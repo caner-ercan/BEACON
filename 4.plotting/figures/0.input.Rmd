@@ -1,0 +1,1114 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(survival)
+library(dplyr)
+library(broom)
+library(purrr)
+BE_MASTER <- Sys.getenv("BE_MASTER", unset = NA_character_)
+if (is.na(BE_MASTER)) stop("Set the BE_MASTER environment variable to the data root")
+base_folder = BE_MASTER
+# 
+# 
+# sample_data_withFU <- read_excel(file.path(base_folder,"0.input/Sample_data/barrett_dataset_withFUtimes.xlsx"))
+# colnames(sample_data_withFU)[1]<- "wsi"
+# colnames(sample_data_withFU)[2]<- "patient"
+# colnames(sample_data_withFU)[3]<- "progression"
+# colnames(sample_data_withFU)[4]<- "flow"
+# sample_data_withFU <- sample_data_withFU %>%
+#   filter(flow != "ND")%>%
+#   mutate(fu_time = ifelse(progression == 0, `Max FU NP`, `Days to EAC`))%>%
+#   select(-c(`Max FU NP`, `Days to EAC`, `Days til last endo`))
+# 
+# whole_set <- read.csv(file.path(base_folder,"1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv"))
+# 
+# split_df <- read.csv(file.path(base_folder,"1.aneuploid/results/training_250131/splits/splits_16_bool.csv"))%>%
+#   mutate(split = case_when(
+#     train == "True" ~ "train",
+#     val == "True" ~ "val"
+#   ))%>%
+#   rename(wsi = X)%>%
+#   select(wsi, split)
+#   
+# 
+# 
+# df <-whole_set%>%
+#   select(slide_id,Y_hat)%>%
+#   rename(wsi = slide_id,
+#          pred = Y_hat)%>%
+#   mutate(wsi = substr(wsi,1,5))%>%
+# left_join(sample_data_withFU, by = "wsi")%>%
+#   left_join(split_df, by = "wsi")%>%
+#   mutate(split = case_when(
+#     Dataset == "NU" ~ "test",
+#     TRUE ~ split))%>%
+#     mutate(flow = factor(flow,levels = c(0,1), labels = c("Diploid", "Aneuploid")))
+# 
+# MDA_selected_tissue <- read.csv(file.path(BE_MASTER, "0.input/0.sampleList/MDA_selected_tissue.csv"))
+# 
+# 
+# 
+# MDA_detailed <-readxl::read_excel(file.path(base_folder,"/0.input/Sample_data/finalUpdatedDetailed/raw_receivedfromTom/Dysplasia Study Detailed Data.xlsx"))%>%
+#   mutate(selected_tisue = as.numeric(substr(Slide, nchar(Slide), nchar(Slide))))%>%
+#   # drop_na(GradeOfDysplasia)%>%
+#   rename(wsi = `Slide #`,
+#          patient = RandomID,
+#          Age = AgeAtEndo,
+#          sex = Gender 
+#          )%>%
+#   # group_by(wsi,patient,Age,sex)%>%
+#   # arrange(desc(Slide)) %>%
+#   # summarise(GradeOfDysplasia = first(GradeOfDysplasia), .groups = 'drop')%>%
+#   select(wsi,patient,selected_tisue,Age,sex,GradeOfDysplasia,BELength)%>%
+#   mutate(GradeOfDysplasia = factor(GradeOfDysplasia,levels = c("N","LGD","LGD/HGD","HGD/LGD","HGD")))
+# 
+# MDA_detailed<- left_join(MDA_selected_tissue,MDA_detailed, by = c("wsi","patient","selected_tisue"))
+#   
+# NU_dem <- read_excel(file.path(base_folder,"/0.input/Sample_data/finalUpdatedDetailed/raw_receivedfromTom/Copy of NU Sample data for Yuan 09262023 updated 10262023 Corrected11072023 with Gender and age at endo.xlsx"))%>%
+#   rename(wsi = `Digital ID`,
+#          patient = RandomID,
+#          Age = `Age at Endo`,
+#          sex =Gender 
+#          )%>%
+#   select(wsi,patient,Age,sex)
+#   
+# 
+# df <- left_join(df,bind_rows(MDA_detailed,NU_dem),by=c("wsi", "patient"))
+# 
+# 
+# df_patient <- df %>%
+#   group_by(patient, fu_time, Dataset, split, progression,sex,Age,BELength) %>%
+#   summarise(
+#     flow = factor(max(as.numeric(flow)), levels = 1:2, labels = c("Diploid", "Aneuploid")),
+#     pred = factor(max(pred), levels = 0:1, labels = c("Diploid", "Aneuploid")),
+#     GradeOfDysplasia = factor(max(as.numeric(GradeOfDysplasia)), levels = 1:5, labels = c("N", "LGD", "LGD/HGD", "HGD/LGD", "HGD")), .groups = "drop"
+#   ) %>%
+#   mutate(progression = factor(progression, levels = c(0, 1), labels = c("NCO", "CO")))
+# 
+
+
+csv_save_folder = file.path(BE_MASTER, "0.input/organised_wsi_patient")
+df <- read.csv(file.path(csv_save_folder,"MIL_samples.csv"))
+df_patient <- read.csv(file.path(csv_save_folder,"MIL_patients.csv"))
+```
+
+
+```{r}
+print(table(df$flow, df$dataset))
+print(table(df_patient$flow, df_patient$dataset))
+print(table(df_patient$split))
+mda_aneup <- table(df$flow, df$dataset)[,1]
+nu_aneup <- table(df$flow, df$dataset)[,2]
+
+
+print(table(df$flow, df$split))
+
+print(table(df_patient$progression, df_patient$dataset))
+print(table(df_patient$progression, df_patient$split))
+mda_pat <- table(df_patient$progression, df_patient$dataset)[,1]
+nu_pat <- table(df_patient$progression, df_patient$dataset)[,2]
+```
+
+```{r}
+pat_tmp <- df%>%
+  group_by(patient, fu_time, Dataset, split, progression) %>%
+  summarise(
+    Age = first(Age,na_rm = T),
+    sex = first(sex,na_rm = T),
+    flow = factor(max(as.numeric(flow)), levels = 1:2, labels = c("Diploid", "Aneuploid")),
+    pred = factor(max(pred), levels = 0:1, labels = c("Diploid", "Aneuploid")))
+table(pat_tmp$split)
+```
+
+
+
+
+```{r}
+
+# save_folder=file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/poster_plot/")
+save_folder=file.path(base_folder,"4.plotting","output","0.input")
+
+colors <- c("#4575b4", "#fc8d59")
+pdf(file.path(save_folder, "pie_mda_aneup.pdf"), width = 8, height = 6)
+pie(mda_aneup,  col = colors )
+
+dev.off()
+pdf(file.path(save_folder, "pie_nu_aneup.pdf"), width = 8, height = 6)
+pie(nu_aneup,  col = colors )
+dev.off()
+
+
+colors <- c("#1b7837", "#762a83")
+pdf(file.path(save_folder, "pie_mda_pat.pdf"), width = 8, height = 6)
+pie(mda_pat,  col = colors )
+dev.off()
+
+pdf(file.path(save_folder,"pie_nu_pat.pdf"), width = 8, height = 6)
+pie(nu_pat,  col = colors )
+dev.off()
+
+```
+
+
+# displasia
+
+```{r}
+
+save_folder=file.path(base_folder,"4.plotting","output","1.mil")
+
+tmp_df <- df_patient %>%
+  # drop_na(GradeOfDysplasia,progression)%>%
+  mutate(dysplasia = case_when(
+    dysplasia %in% c("LGD","LGD/HGD", "HGD/LGD", "HGD") ~ "Dysplasia",
+    dysplasia == "N" ~ "No Dysplasia"))%>%
+  mutate(microscopy = factor(dysplasia, levels = c("No Dysplasia", "Dysplasia")),
+         flow = factor(flow, levels = c("Diploid","Aneuploid")),
+         pred = factor(pred, levels = c("Diploid","Aneuploid")),
+         progression = factor(progression, levels = c("CO","NCO")),
+    flow_or_pred = factor(
+      ifelse(flow == "Aneuploid" | pred == "Aneuploid", 
+             "Aneuploid", 
+             "Diploid"),
+      levels = c("Diploid", "Aneuploid")
+    ),
+    flow_and_pred = factor(
+      ifelse(flow == "Aneuploid" & pred == "Aneuploid", 
+             "Aneuploid", 
+             "Diploid"),
+      levels = c("Diploid", "Aneuploid")
+    ))
+  
+plot_contingency <- function(tmp_df, dataset,var){
+  
+  var_sym <- sym(var)
+  if(dataset != "whole"){
+    tmp_df <- tmp_df%>%
+      filter(dataset == dataset)
+  }
+  if(nrow(tmp_df)>0){
+  # Calculate p-value
+  pval <- table(tmp_df[c(var, 'progression')]) %>%
+    chisq.test() %>%
+    .$p.value
+  
+  # Get number of unique levels for annotation positioning
+  n_levels <- length(unique(tmp_df[[var]]))
+  x_pos <- (n_levels + 1) / 2  # Center the annotation
+  
+  # Create the plot
+  p <- tmp_df %>%
+    group_by(!!var_sym, progression) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    mutate(prop = count / sum(count)) %>%
+    ggplot(aes(x = !!var_sym, y = prop, fill = progression)) +
+      geom_bar(stat = "identity", position = "fill") + 
+      geom_text(aes(label = count),
+                position = position_fill(vjust = 0.5), 
+                size = 3.5) +
+      scale_fill_manual(values = c("#762a83", "#1b7837")) +
+      labs(x = tools::toTitleCase(var), y = "Proportion (%)") +  # Dynamic x-label
+      annotate("text", x = x_pos, y = 1.05, 
+               label = bquote(chi^2 ~ ", p=" ~ .(signif(pval, 3))), size = 1.6) +
+      theme_light() + 
+      theme(panel.grid = element_blank(),
+            panel.border = element_blank(),
+            axis.line = element_line(size = 0.5),
+            axis.title = element_text(size = 5),      # Increase axis title size
+            axis.text = element_text(size = 4),       # Increase axis text size
+            legend.title = element_text(size = 5),    # Control legend title size
+            legend.text = element_text(size = 4))
+  
+  # Save the plot
+  ggsave(file.path(save_folder, paste0("co_",dataset,"_", var, ".pdf")), p, height = 3.7, width = 6, units = "cm")
+  print(p)
+  # Return the plot object
+  }
+}
+
+for(dset in c("whole","MDA","NU")){
+  plot_contingency(tmp_df,dset,"flow")
+  plot_contingency(tmp_df,dset,"pred")
+  plot_contingency(tmp_df,dset,"flow_or_pred")
+  plot_contingency(tmp_df,dset,"flow_and_pred")
+  plot_contingency(tmp_df%>%drop_na(dysplasia),dset,"dysplasia")
+}
+
+
+```
+
+
+
+# demographics
+
+```{r demographics table}
+summarize_continuous <- function(data, var_name) {
+  data %>%
+    group_by(dataset) %>%
+    summarise(
+      mean_val = round(mean(!!sym(var_name), na.rm = TRUE), 1),
+      sd_val = round(sd(!!sym(var_name), na.rm = TRUE), 1),
+      median_val = round(median(!!sym(var_name), na.rm = TRUE), 1),
+      iqr_25 = round(quantile(!!sym(var_name), 0.25, na.rm = TRUE), 1),
+      iqr_75 = round(quantile(!!sym(var_name), 0.75, na.rm = TRUE), 1),
+      n_missing = sum(is.na(!!sym(var_name))),
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      summary = paste0(mean_val, " (", sd_val, ")"),
+      # Alternative: median and IQR format
+      # summary = paste0(median_val, " (", iqr_25, "-", iqr_75, ")")
+    )
+}
+
+# Function to calculate summary statistics for categorical variables
+summarize_categorical <- function(data, var_name) {
+  data %>%
+    filter(!is.na(!!sym(var_name))) %>%
+    count(dataset, !!sym(var_name)) %>%
+    group_by(dataset) %>%
+    mutate(
+      total = sum(n),
+      percentage = round((n / total) * 100, 1),
+      summary = paste0(n, " (", percentage, "%)")
+    ) %>%
+    ungroup()
+}
+
+perform_test <- function(data, var_name, var_type = "continuous") {
+  if (var_type == "continuous") {
+    # t-test or Mann-Whitney U test
+    discovery_vals <- data[data$dataset == "Discovery", var_name]
+    test_vals <- data[data$dataset == "Test", var_name]
+    
+    # Remove NA values
+    discovery_vals <- discovery_vals[!is.na(discovery_vals)]
+    test_vals <- test_vals[!is.na(test_vals)]
+    
+    # Perform t-test (you might want to use wilcox.test instead)
+    if (length(discovery_vals) > 0 & length(test_vals) > 0) {
+      test_result <- t.test(discovery_vals, test_vals)
+      return(sprintf("%.2e", test_result$p.value))
+    } else {
+      return(NA)
+    }
+  } else {
+    # Chi-square test for categorical variables
+    cont_table <- table(data$dataset, data[[var_name]])
+    if (all(dim(cont_table) > 1) & all(cont_table >= 5)) {
+      test_result <- chisq.test(cont_table)
+      return(sprintf("%.2e", test_result$p.value))
+    } else {
+      # Use Fisher's exact test for small counts
+      test_result <- fisher.test(cont_table)
+      return(sprintf("%.2e", test_result$p.value))
+    }
+  }
+}
+
+
+
+```
+
+```{r}
+create_demographics_table <- function(dataset) {
+    results <- data.frame(
+    Variable = character(),
+    Discovery = character(),
+    Test = character(),
+    p_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  # Age
+  age_summary <- summarize_continuous(dataset, "age")
+  age_p <- perform_test(dataset, "age", "continuous")
+  
+  age_df <- age_summary%>%
+    select(dataset,summary)%>%
+    pivot_wider(names_from = dataset, values_from = summary)%>%
+    mutate(Variable = "Age, mean (SD)",
+           p_value = age_p)%>%
+    relocate(Variable, .before =everything())
+
+  results <- rbind(results, age_df)
+  
+  # sex
+  sex_summary <- summarize_categorical(dataset, "sex")
+  sex_p <- perform_test(dataset, "sex", "categorical")
+  
+  results <- rbind(results, data.frame(
+    Variable = "Sex, n (%)",
+    Discovery = "",
+    Test = "",
+    p_value = sex_p
+  ))
+  
+  unique_sex <- unique(dataset$sex)
+  for (sex_level in unique_sex[!is.na(unique_sex)]) {
+    sex_subset <- sex_summary[sex_summary$sex == sex_level, ]
+    results <- rbind(results, data.frame(
+      Variable = paste0("  ", sex_level),
+      Discovery = ifelse(nrow(sex_subset[sex_subset$dataset == "Discovery", ]) > 0,
+                        sex_subset$summary[sex_subset$dataset == "Discovery"], "0 (0%)"),
+      Test = ifelse(nrow(sex_subset[sex_subset$dataset == "Test", ]) > 0,
+                   sex_subset$summary[sex_subset$dataset == "Test"], "0 (0%)"),
+      p_value = NA
+    ))
+  }
+    
+  # Progression
+  prog_summary <- summarize_categorical(dataset, "progression")
+  prog_p <- perform_test(dataset, "progression", "categorical")
+  
+  # Add main category header
+  results <- rbind(results, data.frame(
+    Variable = "Progression, n (%)",
+    Discovery = "",
+    Test = "",
+    p_value = prog_p
+  ))
+  
+  
+
+  
+  # Add subcategories
+  unique_prog <- unique(dataset$progression)
+  for (prog_level in unique_prog[!is.na(unique_prog)]) {
+    prog_subset <- prog_summary[prog_summary$progression == prog_level, ]
+    results <- rbind(results, data.frame(
+      Variable = paste0("  ", prog_level),
+      Discovery = ifelse(nrow(prog_subset[prog_subset$dataset == "Discovery", ]) > 0,
+                        prog_subset$summary[prog_subset$dataset == "Discovery"], "0 (0%)"),
+      Test = ifelse(nrow(prog_subset[prog_subset$dataset == "Test", ]) > 0,
+                   prog_subset$summary[prog_subset$dataset == "Test"], "0 (0%)"),
+      p_value = NA
+    ))
+  }
+  
+  # Flow
+  flow_summary <- summarize_categorical(dataset, "flow")
+  flow_p <- perform_test(dataset, "flow", "categorical")
+  
+  results <- rbind(results, data.frame(
+    Variable = "Flow, n (%)",
+    Discovery = "",
+    Test = "",
+    p_value = flow_p
+  ))
+  
+  unique_flow <- unique(dataset$flow)
+  for (flow_level in unique_flow[!is.na(unique_flow)]) {
+    flow_subset <- flow_summary[flow_summary$flow == flow_level, ]
+    results <- rbind(results, data.frame(
+      Variable = paste0("  ", flow_level),
+      Discovery = ifelse(nrow(flow_subset[flow_subset$dataset == "Discovery", ]) > 0,
+                        flow_subset$summary[flow_subset$dataset == "Discovery"], "0 (0%)"),
+      Test = ifelse(nrow(flow_subset[flow_subset$dataset == "Test", ]) > 0,
+                   flow_subset$summary[flow_subset$dataset == "Test"], "0 (0%)"),
+      p_value = NA
+    ))
+  }
+  
+  # Grade of Dysplasia
+  dysp_summary <- summarize_categorical(dataset, "dysplasia")
+  dysp_p <- perform_test(dataset, "dysplasia", "categorical")
+  
+  results <- rbind(results, data.frame(
+    Variable = "Grade of Dysplasia, n (%)",
+    Discovery = "",
+    Test = "",
+    p_value = dysp_p
+  ))
+  
+  unique_dysp <- unique(dataset$dysplasia)
+  for (dysp_level in unique_dysp[!is.na(unique_dysp)]) {
+    dysp_subset <- dysp_summary[dysp_summary$dysplasia == dysp_level, ]
+    results <- rbind(results, data.frame(
+      Variable = paste0("  ", dysp_level),
+      Discovery = ifelse(nrow(dysp_subset[dysp_subset$dataset == "Discovery", ]) > 0,
+                        dysp_subset$summary[dysp_subset$dataset == "Discovery"], "0 (0%)"),
+      Test = ifelse(nrow(dysp_subset[dysp_subset$dataset == "Test", ]) > 0,
+                   dysp_subset$summary[dysp_subset$dataset == "Test"], "0 (0%)"),
+      p_value = NA
+    ))
+  }
+  
+  
+  # Follow-up time
+  followup_summary <- summarize_continuous(dataset%>%
+                                             mutate(fu_time = fu_time *12 / 365.25), "fu_time")
+  followup_p <- perform_test(dataset, "fu_time", "continuous")
+  
+  results <- rbind(results, data.frame(
+    Variable = "Follow-up month, mean (SD)",
+    Discovery = followup_summary$summary[followup_summary$dataset == "Discovery"],
+    Test = followup_summary$summary[followup_summary$dataset == "Test"],
+    p_value = followup_p
+  ))
+  
+  # BE Length
+  BELength_summary <- summarize_continuous(dataset, "BELength")
+  BELength_p <- perform_test(dataset, "BELength", "continuous")
+  
+  BELength_df <- BELength_summary%>%
+    select(dataset,summary)%>%
+    pivot_wider(names_from = dataset, values_from = summary)%>%
+    mutate(Variable = "BE Length, mean (SD)",
+           p_value = BELength_p)%>%
+    relocate(Variable, .before =everything())
+
+  results <- rbind(results, BELength_df)
+    
+  if ("biopsy_per_patient" %in% colnames(dataset)){
+  bpp_summary <- summarize_continuous(dataset, "biopsy_per_patient")
+  bpp_p <- perform_test(dataset, "biopsy_per_patient", "continuous")
+  
+    results <- rbind(results, data.frame(
+    Variable = "Biopsy-per-patient (SD)",
+    Discovery = bpp_summary$summary[bpp_summary$dataset == "Discovery"],
+    Test = bpp_summary$summary[bpp_summary$dataset == "Test"],
+    p_value = bpp_p
+    ))
+  }
+
+  
+  return(results)
+}
+```
+
+
+```{r}
+
+demographics_table <- create_demographics_table(flow_samples%>%
+                                                  mutate(dataset = case_when(
+                                                    dataset == "MDA" ~ "Discovery",
+                                                    dataset == "NU" ~ "Test"
+                                                  ))%>%
+  mutate(dysplasia = case_when(
+    dysplasia %in% c("LGD","LGD/HGD", "HGD/LGD", "HGD") ~ "Dysplasia",
+    dysplasia == "N" ~ "No Dysplasia")))
+
+demographics_patient_table <- create_demographics_table(flow_patient%>%
+                                                  mutate(dataset = case_when(
+                                                    dataset == "MDA" ~ "Discovery",
+                                                    dataset == "NU" ~ "Test"
+                                                  ))%>%
+  mutate(dysplasia = case_when(
+    dysplasia %in% c("LGD","LGD/HGD", "HGD/LGD", "HGD") ~ "Dysplasia",
+    dysplasia == "N" ~ "No Dysplasia")))
+```
+
+```{r}
+# demographics_patient_table <- df %>%
+#   group_by(patient, fu_time, Dataset, Age, split, progression,sex,BELength) %>%
+#   summarise(
+#     flow = max(as.numeric(flow))-1,
+#     pred = max(pred),
+#     GradeOfDysplasia = as.character(factor(max(as.numeric(GradeOfDysplasia)), levels = 1:5, labels = c("N", "LGD", "LGD/HGD", "HGD/LGD", "HGD"))), 
+#     biopsy_per_patient = n(),
+#     .groups = "drop"
+#   )%>%
+#   mutate(dataset = case_when(
+#     Dataset == "MDA" ~ "Discovery",
+#     Dataset == "NU" ~ "Test"
+#   ))
+ demographics_patient_table<-  df%>%
+  group_by(patient)%>%
+  summarise(biopsy_per_patient = n(),
+     .groups = "drop")%>%
+  left_join(df_patient,.,by="patient")%>%
+  mutate(dataset = case_when(
+    dataset == "MDA" ~ "Discovery",
+    dataset == "NU" ~ "Test"
+  ))%>%
+  mutate(dysplasia = case_when(
+    dysplasia %in% c("LGD","LGD/HGD", "HGD/LGD", "HGD") ~ "Dysplasia",
+    dysplasia == "N" ~ "No Dysplasia"))%>%
+  create_demographics_table()
+
+View(full_join(select(df,c(patient,wsi)),df_patient, by="patient"))
+
+
+
+```
+
+
+
+
+# dem cox
+```{r dem cox}
+
+perform_cox_analysis <- function(data, dataset_name) {
+  
+  # Check if required columns exist
+  required_cols <- c("Age", "Sex",  "flow", "fu_time", "event")
+  missing_cols <- setdiff(required_cols, names(data))
+  if(length(missing_cols) > 0) {
+    warning(paste("Missing columns for dataset", dataset_name, ":", paste(missing_cols, collapse = ", ")))
+    return(NULL)
+  }
+  
+  # Remove rows with missing data
+  data_clean <- data[complete.cases(data[, required_cols]), ]
+  
+  if(nrow(data_clean) < 10) {
+    warning(paste("Dataset", dataset_name, "has insufficient data after cleaning"))
+    return(NULL)
+  }
+  
+  # Create survival object
+  surv_obj <- Surv(data_clean$fu_time, data_clean$event)
+  
+  # Variables to analyze
+  variables <- c("Age", "Sex",  "flow")
+  
+  # Initialize results dataframe
+  results <- data.frame(
+    Dataset = character(),
+    Variable = character(),
+    Analysis = character(),
+    HR = numeric(),
+    CI_lower = numeric(),
+    CI_upper = numeric(),
+    P_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+  significant_vars <- character()
+
+  # Univariate analysis
+  cat("Performing univariate analysis for dataset:", dataset_name, "\n")
+  
+  for(var in variables) {
+    tryCatch({
+      # Create formula
+      formula_str <- paste("surv_obj ~", var)
+      cox_model <- coxph(as.formula(formula_str), data = data_clean)
+      
+      # Extract results
+      summary_cox <- summary(cox_model)
+      
+      # Check if this variable is significant (any coefficient p-value < threshold)
+      var_is_significant <- FALSE
+      
+      # Get coefficients
+      if(nrow(summary_cox$coefficients) > 0) {
+        for(i in 1:nrow(summary_cox$coefficients)) {
+          coef_name <- rownames(summary_cox$coefficients)[i]
+          p_value <- summary_cox$coefficients[i, "Pr(>|z|)"]
+          
+          # Check if this coefficient is significant
+          if(p_value < 0.05) {
+            var_is_significant <- TRUE
+          }
+          
+          results <- rbind(results, data.frame(
+            Dataset = dataset_name,
+            Variable = paste0(var, "_", gsub(paste0("^", var), "", coef_name)),
+            Analysis = "Univariate",
+            HR = summary_cox$coefficients[i, "exp(coef)"],
+            CI_lower = summary_cox$conf.int[i, "lower .95"],
+            CI_upper = summary_cox$conf.int[i, "upper .95"],
+            P_value = p_value,
+            stringsAsFactors = FALSE
+          ))
+        }
+        
+        # Add to significant variables if any coefficient was significant
+        if(var_is_significant) {
+          significant_vars <- c(significant_vars, var)
+        }
+      }
+    }, error = function(e) {
+      cat("Error in univariate analysis for", var, "in dataset", dataset_name, ":", e$message, "\n")
+    })
+  }
+  
+  # Report significant variables
+  if(length(significant_vars) > 0) {
+    cat("Significant variables (p <", 0.05, ") for dataset", dataset_name, ":", paste(significant_vars, collapse = ", "), "\n")
+  } else {
+    cat("No significant variables found for dataset", dataset_name, "- skipping multivariate analysis\n\n")
+    return(results)
+  }
+  
+  # Multivariate analysis (only if we have significant variables)
+  if(length(significant_vars) > 1) {
+    cat("Performing multivariate analysis for dataset:", dataset_name, "\n")
+    
+    tryCatch({
+      # Create multivariate formula with only significant variables
+      formula_mv <- paste("surv_obj ~", paste(significant_vars, collapse = " + "))
+      cox_mv <- coxph(as.formula(formula_mv), data = data_clean)
+      
+      # Extract results
+      summary_mv <- summary(cox_mv)
+      
+      # Get coefficients
+      if(nrow(summary_mv$coefficients) > 0) {
+        for(i in 1:nrow(summary_mv$coefficients)) {
+          coef_name <- rownames(summary_mv$coefficients)[i]
+          
+          # Find which variable this coefficient belongs to
+          var_match <- significant_vars[sapply(significant_vars, function(v) grepl(paste0("^", v), coef_name))]
+          if(length(var_match) > 0) {
+            var_name <- var_match[1]
+            coef_suffix <- gsub(paste0("^", var_name), "", coef_name)
+            display_name <- paste0(var_name, "_", coef_suffix)
+          } else {
+            display_name <- coef_name
+          }
+          
+          results <- rbind(results, data.frame(
+            Dataset = dataset_name,
+            Variable = display_name,
+            Analysis = "Multivariate",
+            HR = summary_mv$coefficients[i, "exp(coef)"],
+            CI_lower = summary_mv$conf.int[i, "lower .95"],
+            CI_upper = summary_mv$conf.int[i, "upper .95"],
+            P_value = summary_mv$coefficients[i, "Pr(>|z|)"],
+            stringsAsFactors = FALSE
+          ))
+        }
+      }
+      
+      # Add model statistics
+      cat("Model statistics for", dataset_name, ":\n")
+      cat("- Concordance:", summary_mv$concordance[1], "\n")
+      cat("- Likelihood ratio test p-value:", summary_mv$logtest[3], "\n")
+      cat("- Wald test p-value:", summary_mv$waldtest[3], "\n")
+      cat("- Score test p-value:", summary_mv$sctest[3], "\n\n")
+      
+    }, error = function(e) {
+      cat("Error in multivariate analysis for dataset", dataset_name, ":", e$message, "\n")
+    })
+  } else if(length(significant_vars) == 1) {
+    cat("Only one significant variable found for dataset", dataset_name, "- multivariate analysis not needed\n\n")
+  }
+  
+  return(results)
+}
+
+run_cox_analysis_by_dataset <- function(df) {
+  
+  # Check if dataset column exists
+  if(!"dataset" %in% names(df)) {
+    stop("Dataset column 'dataset' not found in dataframe")
+  }
+  
+  # Get unique datasets
+  datasets <- unique(df$dataset)
+  cat("Found", length(datasets), "datasets:", paste(datasets, collapse = ", "), "\n\n")
+  
+  # Initialize combined results
+  all_results <- data.frame()
+  
+  # Process each dataset
+  for(ds in datasets) {
+    cat("=== Processing Dataset:", ds, "===\n")
+    
+    # Subset data for current dataset
+    dataset_data <- df[df$dataset == ds, ]
+    cat("Dataset", ds, "has", nrow(dataset_data), "observations\n")
+    
+    # Perform analysis
+    results <- perform_cox_analysis(dataset_data, ds)
+    
+    if(!is.null(results)) {
+      all_results <- rbind(all_results, results)
+    }
+    
+    cat("\n")
+  }
+  
+  # Format results for better presentation
+  all_results$HR_CI <- paste0(
+    round(all_results$HR, 2), " (", 
+    round(all_results$CI_lower, 2), "-", 
+    round(all_results$CI_upper, 2), ")"
+  )
+  
+  all_results$P_value_formatted <- ifelse(
+    all_results$P_value < 0.001, 
+    "<0.001", 
+    round(all_results$P_value, 3)
+  )
+  
+  # Create summary table
+  summary_table <- all_results[, c("Dataset", "Variable", "Analysis", "HR_CI", "P_value_formatted")]
+  names(summary_table) <- c("Dataset", "Variable", "Analysis", "HR (95% CI)", "P-value")
+  
+  return(list(
+    detailed_results = all_results,
+    summary_table = summary_table
+  ))
+}
+
+df_patient_tmp <- df_patient %>%
+  mutate(GradeOfDysplasia = as.character(GradeOfDysplasia),
+         progression = as.character(progression))%>%
+  mutate(dysplasia = case_when(
+    GradeOfDysplasia == "N" ~ "no",
+    GradeOfDysplasia %in% c("LGD","LGD/HGD","HGD/LGD","HGD") ~ "yes",
+    TRUE ~ NA)
+    )%>%
+  mutate(event = case_when(
+    progression == "CO" ~ 1,
+    progression == "NCO" ~ 0,
+    TRUE ~ NA
+  ))%>%
+  rename(dataset = Dataset,
+         Sex = sex)%>%
+  filter(!(event == 1 & fu_time < 30))
+
+results <- run_cox_analysis_by_dataset(df_patient_tmp)
+
+```
+
+```{r}
+results[["summary_table"]]
+```
+
+```{r}
+create_publication_table <- function(results) {
+  
+  # Reshape data for better presentation
+  pub_table <- results$detailed_results %>%
+    select(Dataset, Variable, Analysis, HR, CI_lower, CI_upper, P_value) %>%
+    mutate(
+      HR_formatted = paste0(sprintf("%.2f", HR), " (", 
+                           sprintf("%.2f", CI_lower), "-", 
+                           sprintf("%.2f", CI_upper), ")"),
+      P_formatted = case_when(
+        P_value < 0.001 ~ "<0.001",
+        P_value < 0.01 ~ sprintf("%.3f", P_value),
+        TRUE ~ sprintf("%.3f", P_value)
+      )
+    ) %>%
+    select(Dataset, Variable, Analysis, HR_formatted, P_formatted) %>%
+    rename("HR (95% CI)" = HR_formatted, "P-value" = P_formatted)
+  
+  return(pub_table)
+}
+create_publication_table(results)
+```
+
+```{r}
+library(survminer)
+output_folder=file.path(BE_MASTER, "4.plotting/output/0.input/demo_cox")
+df_patient_tmp <- df_patient %>%
+  mutate(dysplasia = as.character(dysplasia),
+         progression = as.character(progression))%>%
+  mutate(dysplasia = case_when(
+    dysplasia == "N" ~ "no",
+    dysplasia %in% c("LGD","LGD/HGD","HGD/LGD","HGD") ~ "yes",
+    TRUE ~ NA)
+    )%>%
+  mutate(event = case_when(
+    progression == "CO" ~ 1,
+    progression == "NCO" ~ 0,
+    TRUE ~ NA
+  ))%>%
+  drop_na(fu_time)%>%
+  filter(!(event == 1 & fu_time < 30))
+
+
+plot_forest <- function(df_patient_tmp, metric){
+  if(unique(df_patient_tmp$dataset) == "MDA"){
+  variables <- c("age", "sex", "dysplasia", "BELength",  metric)
+  } else if(unique(df_patient_tmp$dataset) == "NU"){
+  variables <- c("age", "sex",  metric)
+  }
+  surv_obj <- Surv(patient_dataset_df$fu_time, patient_dataset_df$event)
+  formula_mv <- paste("surv_obj ~", paste(variables, collapse = " + "))
+  cox_mv <- coxph(as.formula(formula_mv), data = as.data.frame(patient_dataset_df))
+  p <- ggforest(cox_mv,fontsize = 1.1)
+  return(p)
+}
+df_patient_tmp$sex <- factor(df_patient_tmp$sex, levels = c("F", "M"))
+df_patient_tmp$pred <- factor(df_patient_tmp$pred, levels = c("Diploid", "Aneuploid"))
+df_patient_tmp$flow <- factor(df_patient_tmp$flow, levels = c("Diploid", "Aneuploid"))
+  patient_dataset_df <- filter(df_patient_tmp,dataset == "MDA")
+p <- plot_forest(patient_dataset_df, "pred" )
+p
+  ggsave(file.path(output_folder,"MDA_pred_mv.pdf"),p)
+p <- plot_forest(patient_dataset_df,"flow")
+p
+  ggsave(file.path(output_folder,"MDA_flow_mv.pdf"),p)
+  patient_dataset_df <- filter(df_patient_tmp, dataset == "NU")
+p <- plot_forest(patient_dataset_df,"pred")
+p
+  ggsave(file.path(output_folder,"NU_pred_mv.pdf"),p)
+p <- plot_forest(patient_dataset_df,"flow")
+p
+  ggsave(file.path(output_folder,"NU_flow_mv.pdf"),p)
+```
+
+
+
+
+```{ ecology cox}
+eco_pred <- read.csv(file.path(BE_MASTER, "4.plotting/output/3.1.ecology/4.plot_output/3.1.ecology/250815/split_new/auc_6_1234_withnuc/risk_patient.csv"))
+
+eco_pred <- eco_pred %>%
+  select(patient, fu_time, progression, eco_split, dataset,risk_category_01_2) %>%
+  mutate(progression = as.character(case_when(
+    progression == 1 ~ "CO",
+    progression == 0 ~ "NCO",
+    TRUE ~ as.character(progression)
+  )))
+
+
+
+df_patient_tmp_eco <- left_join(df_patient_tmp,eco_pred, by = c("patient", "fu_time", "progression","dataset"))
+
+```
+
+```{r}
+library(survminer)
+eco_patient <- read.csv(file.path(csv_save_folder,"eco_patients.csv"))%>%
+  mutate(risk_category_01_2 = ifelse(pred == "Diploid" | eco_risk_category == "Low Risk","Low Risk",
+                                     ifelse(eco_risk_category == "High Risk","High Risk", NA)),
+         risk_category_01_2 = factor(risk_category_01_2, levels = c("Low Risk", "High Risk")))
+  
+df_patient_tmp_eco <- eco_patient %>%
+  mutate(event = case_when(
+    progression == "CO" ~ 1,
+    progression == "NCO" ~ 0,
+    TRUE ~ NA
+  ))%>%
+  mutate(dysplasia = case_when(
+    dysplasia == "N" ~ "no",
+    dysplasia %in% c("LGD","LGD/HGD","HGD/LGD","HGD") ~ "yes",
+    TRUE ~ NA)
+    )
+df_patient_tmp_eco$sex <- factor(df_patient_tmp_eco$sex, levels = c("F", "M"))
+
+df_patient_tmp_eco$pred <- factor(df_patient_tmp_eco$pred, levels = c("Diploid", "Aneuploid"))
+df_patient_tmp_eco$flow <- factor(df_patient_tmp_eco$flow, levels = c("Diploid", "Aneuploid"))
+df_patient_tmp_eco$dysplasia <- factor(df_patient_tmp_eco$dysplasia, levels = c("no", "yes"))
+
+output_folder=file.path(BE_MASTER, "4.plotting/output/3.1.ecology/cox")
+plot_forest <- function(plot_df, metric="flow",variables, title = NA){
+  main <- ifelse(!is.na(title), paste("Hazard ratio", title, sep = "-"), "Hazard ratio")
+  plot_df <- plot_df%>%
+    filter(fu_time>14 & !is.na(fu_time))
+  variables <- c("age","sex","dysplasia", "BELength",metric)
+  surv_obj <- Surv(plot_df$fu_time, plot_df$event)
+  formula_mv <- paste("surv_obj ~", paste(variables, collapse = " + "))
+  control = coxph.control(iter.max=100)
+  cox_mv <- coxph(as.formula(formula_mv), data = as.data.frame(plot_df), control = control)
+  p <- ggforest(cox_mv, data = as.data.frame(plot_df), fontsize = 1.1, main = main)
+  print(p)
+  return(p)
+
+}
+# # whole
+p <- plot_forest(plot_df = df_patient_tmp_eco, "flow", "whole")
+
+ggsave(file.path(output_folder,paste("wholeDataset","_flow",".pdf")),p, width = 8)
+p <- plot_forest(df_patient_tmp_eco, "risk_category_01_2", "whole")
+
+ggsave(file.path(output_folder,paste("wholeDataset","_ecomodel",".pdf")),p, width = 8)
+p <- plot_forest(df_patient_tmp_eco, "pred", "whole")
+
+ggsave(file.path(output_folder,paste("wholeDataset","_milPred",".pdf")),p, width = 8)
+
+
+
+# ggsave(file.path(output_folder,paste("wholeDataset","_pred",".pdf")),p, width = 8)
+# # eco train
+# plot_df <- filter(df_patient_tmp_eco, eco_split == "train")
+# p <- plot_forest(plot_df, c("age","sex","dysplasia", "BELength","flow"), "train")
+# p
+# # # ggsave(file.path(output_folder,paste("eco_split","_train","_flow",".pdf")),p, width = 8)
+# p <- plot_forest(plot_df, c("age", "sex","dysplasia", "BELength","risk_category_01_2"), "train")
+# p
+# # ggsave(file.path(output_folder,paste("eco_split","_train","_ecomodel",".pdf")),p, width = 8)
+# 
+# plot_df <- filter(df_patient_tmp_eco, eco_split == "val")
+# 
+# p <- plot_forest(plot_df, c("age", "sex","dysplasia", "BELength","flow"), "val")
+# p
+# 
+# p <- plot_forest(plot_df, c("age", "sex", "dysplasia","BELength","risk_category_01_2"), "val")
+# p
+# variables <- c("age", "sex", "dysplasia", "BELength", "flow","risk_category_01_2")
+# plot_df <- filter(df_patient_tmp_eco, eco_split == "train")
+# surv_obj <- Surv(plot_df$fu_time, plot_df$event)
+# univariate_results <- lapply(variables, function(var) {
+#   formula <- as.formula(paste("surv_obj ~", var))
+#   cox_model <- coxph(formula, data = plot_df)
+# 
+#   tidy(cox_model, exponentiate = TRUE, conf.int = TRUE) %>%
+#     mutate(variable = var) %>%
+#     select(variable, term, HR = estimate,
+#            CI_lower = conf.low, CI_upper = conf.high,
+#            p.value)
+# })
+# results_df <- bind_rows(univariate_results)
+
+
+```
+
+
+```{r}
+library(survival)
+library(broom)
+library(ggplot2)
+library(dplyr)
+
+plot_uni <- function(df_patient_tmp_eco){
+# Define variables
+variables <- c("age", "sex", "dysplasia", "BELength","risk_category_01_2")
+
+# Create survival object
+surv_obj <- Surv(plot_df$fu_time, plot_df$event)
+
+# Run univariate Cox models
+univariate_results <- lapply(variables, function(var) {
+  formula <- as.formula(paste("surv_obj ~", var))
+  cox_model <- coxph(formula, data = plot_df)
+  
+  tidy(cox_model, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(variable = var) %>%
+    select(variable, term, HR = estimate, 
+           CI_lower = conf.low, CI_upper = conf.high, 
+           p.value)
+})
+
+# Combine results
+results_df <- bind_rows(univariate_results)
+results_df <- results_df %>%
+  filter_all(all_vars(!is.infinite(.)))
+
+# Create labels with HR and CI
+results_df <- results_df %>%
+  mutate(
+    HR_label = sprintf("%.2f (%.2f-%.2f)", HR, CI_lower, CI_upper),
+    p_label = ifelse(p.value < 0.001, "P<0.001", 
+                     sprintf("P=%.3f", p.value)),
+    # Clean term names for display
+    term_clean = gsub("dysplasiayes", "Dysplasia: Yes", term),
+    term_clean = gsub("SexM", "Sex: Male", term_clean),
+    term_clean = gsub("flowAneuploid", "Flow: Aneuploid", term_clean),
+    term_clean = gsub("^Age$", "Age", term_clean),
+    term_clean = gsub("^BELength$", "BE Length", term_clean),
+    row_order = row_number()
+  )
+  
+p <- ggplot(results_df, aes(y = reorder(term_clean, -row_order), x = HR)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray40", size = 0.8) +
+  geom_point(size = 4, color = "#2C3E50") +
+  geom_errorbarh(aes(xmin = CI_lower, xmax = CI_upper), 
+                 height = 0.3, size = 0.8, color = "#2C3E50") +
+  geom_text(aes(x = max(CI_upper, na.rm = TRUE) * 1.5, label = HR_label),
+            hjust = 0, size = 3.5) +
+  geom_text(aes(x = max(CI_upper, na.rm = TRUE) * 3, label = p_label),
+            hjust = 0, size = 3.5) +
+  scale_x_log10(
+    breaks = c(0.1, 0.5, 1, 2, 5, 10),
+    labels = c("0.1", "0.5", "1", "2", "5", "10")
+  ) +
+  coord_cartesian(xlim = c(min(results_df$CI_lower, na.rm = TRUE) * 0.5,
+                           max(results_df$CI_upper, na.rm = TRUE) * 4)) +
+  labs(
+    title = "Univariate Cox Regression Analysis",
+    subtitle = paste0("N = ", nrow(plot_df), " patients, ", 
+                     sum(plot_df$event), " events"),
+    x = "Hazard Ratio (95% CI)",
+    y = NULL
+  ) +
+  annotate("text", x = max(results_df$CI_upper, na.rm = TRUE) * 1.5, 
+           y = nrow(results_df) + 0.7, label = "HR (95% CI)", 
+           fontface = "bold", hjust = 0, size = 3.5) +
+  annotate("text", x = max(results_df$CI_upper, na.rm = TRUE) * 3, 
+           y = nrow(results_df) + 0.7, label = "P-value", 
+           fontface = "bold", hjust = 0, size = 3.5) +
+  theme_minimal() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90"),
+    axis.text.y = element_text(size = 11, color = "black"),
+    axis.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 11, face = "bold", margin = margin(t = 10)),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "gray40")
+  )
+
+print(p)
+return(p)
+}
+
+output_folder <- file.path(BE_MASTER, "4.plotting/output/3.1.ecology/cox")
+plot_df <- filter(df_patient_tmp_eco, eco_split == "train" & fu_time > 14)
+p <- plot_uni(plot_df)
+ggsave(file.path(output_folder,paste("eco_split","_uni","_train",".pdf")),p, width = 15)
+plot_df <- filter(df_patient_tmp_eco, eco_split == "val" & fu_time > 14)
+p <- plot_uni(plot_df)
+ggsave(file.path(output_folder,paste("eco_split","_uni","_val",".pdf")),p, width = 15)
+
+```
+
+
+```{r}
+library(broom)
+library(forestplot)
+tidied_model <- broom::tidy(cox_mv, exponentiate = TRUE, conf.int = TRUE)
+
+# Use the tidied data to generate the forest plot
+cox_results <- tidy(cox_mv, conf.int = TRUE, exponentiate = TRUE) 
+
+
+ggplot(cox_results, aes(y = term, x = estimate)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  theme_minimal()
+```
+
+
+```{r}
+plot_df <- filter(df_patient_tmp_eco, dataset == "MDA")
+p <- plot_forest(plot_df, c("Age", "Sex","dysplasia","flow"))
+p
+ggsave(file.path(output_folder,paste("split","_train","_flow",".pdf")),p, width = 8)
+p <- plot_forest(plot_df, c("Age", "Sex","dysplasia","pred"))
+p
+ggsave(file.path(output_folder,paste("split","_train","_pred",".pdf")),p, width = 8)
+p <- plot_forest(plot_df, c("Age", "Sex","dysplasia","risk_category_01_2"))
+p
+ggsave(file.path(output_folder,paste("split","_train","_ecomodel",".pdf")),p, width = 8)
+plot_forest <- function(plot_df, var){
+  variables <- c("Age", "Sex",var)
+  surv_obj <- Surv(plot_df$fu_time, plot_df$event)
+  formula_mv <- paste("surv_obj ~", paste(variables, collapse = " + "))
+  control = coxph.control(iter.max=100)
+  cox_mv <- coxph(as.formula(formula_mv), data = as.data.frame(plot_df),control = control)
+  p <- ggforest(cox_mv,fontsize = 1.1)
+  return(p)
+}
+plot_df <- filter(df_patient_tmp_eco, dataset == "NU")
+p <- plot_forest(plot_df, c("Age", "Sex","flow"))
+p
+ggsave(file.path(output_folder,paste("split","_test","_flow",".pdf")),p, width = 8)
+p <- plot_forest(plot_df, c("Age", "Sex","pred"))
+p
+ggsave(file.path(output_folder,paste("split","_test","_pred",".pdf")),p, width = 8)
+p <- plot_forest(plot_df, c("Age", "Sex","risk_category_01_2"))
+p
+ggsave(file.path(output_folder,paste("split","_test","_eco_model",".pdf")),p, width = 8)
+
+```
+

@@ -1,0 +1,134 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+setwd(file.path(BE_MASTER, "3.integration"))
+
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(purrr)
+BE_MASTER <- Sys.getenv("BE_MASTER", unset = NA_character_)
+if (is.na(BE_MASTER)) stop("Set the BE_MASTER environment variable to the data root")
+
+```
+
+```{r import sample data}
+
+# sample_data_withFU <- read_excel(file.path(BE_MASTER, "0.input/Sample_data/barrett_dataset_withFUtimes.xlsx"))
+sample_data_withFU <- read_excel(file.path(BE_MASTER, "0.input/Sample_data/barrett_dataset_withFUtimes.xlsx"))
+
+colnames(sample_data_withFU)[1]<- "slide_id"
+colnames(sample_data_withFU)[2]<- "patient"
+colnames(sample_data_withFU)[3]<- "progression"
+colnames(sample_data_withFU)[4]<- "flow"
+colnames(sample_data_withFU)[5]<- "dataset"
+sample_data <- sample_data_withFU %>%
+  # filter(Dataset == "NU")%>%
+  mutate(time = ifelse(progression == 0, `Max FU NP`, `Days to EAC`))
+sample_data$progression <- as.factor(sample_data$progression)
+sample_data<- sample_data[,c( "patient","slide_id", "progression","flow", "dataset", "time")]
+
+
+```
+
+
+
+```{r aneuploid predictions}
+
+# whole_set_csv <- file.path(BE_MASTER, "1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv")
+whole_set_csv <- file.path(BE_MASTER, "1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv")
+
+predictions <- read.csv(whole_set_csv)
+predictions$wsi <-  as.factor(substr(predictions$slide_id, 1, 5))
+colnames(predictions) <- c("slide_id", "flow", "pred", "pred_prob0", "pred_prob", "wsi")
+predictions <- predictions[,c(1:3,5:6)]
+predictions <- left_join(predictions%>%select(wsi,flow,pred), sample_data %>% mutate(wsi = substr(slide_id, 1, 5))%>%select(wsi,dataset), by = "wsi")
+```
+
+```{r}
+tsv_folder <- file.path(BE_MASTER, "2.intermediate/2.4.inference")
+export_folder <- file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/merged")
+# collected_files_cells_csv_path <- file.path(export_folder, fix_path("collected_files_cell_attn_cell.csv"))
+
+# Function to process a single file
+process_file <- function(single_file_path) {
+  single_file <- read.delim(single_file_path, na.strings = "NaN")
+  if (nrow(single_file) > 0) {
+    return(single_file)
+  } else {
+    return(NULL)
+  }
+}
+
+# Get the list of TSV files
+tsv_files <- list.files(file.path(tsv_folder, "tsv_attn_cell_250801"), full.names = TRUE)
+
+# Process files using purrr's map_dfr
+datase_collected_files_cells <- map_dfr(tsv_files, process_file)
+
+# Add wsi column
+datase_collected_files_cells$wsi <- substr(datase_collected_files_cells$Image, 1, 5)
+
+# Join with predictions
+datase_collected_files_cells <- left_join(predictions, datase_collected_files_cells, by = "wsi")
+
+datase_collected_files_cells <- datase_collected_files_cells%>%
+  filter(!Parent %in% c("Image", "background", "squamous_area"))
+```
+
+
+```{r}
+region_level <- readRDS(file.path(export_folder,"region_level_250808.RDS"))%>%
+  select(Image,Parent, Class)%>%
+  rename(SegmentClass = Class)
+
+regions2update <- datase_collected_files_cells%>%
+  select(Image,Parent)%>%
+  filter(!Parent %in% c("epithelium_area","stroma_area"))%>%
+  distinct()%>%
+  left_join(y=region_level%>%select(-attn_class_extended), by = c("Image", "Parent"))%>%
+  drop_na(SegmentClass)%>%
+  group_by(Image, Parent) %>% #remove empty ones
+  filter(n_distinct(SegmentClass) == 1)  %>%
+  ungroup()
+
+```
+
+
+```{r}
+datase_collected_files_cells_clean <- datase_collected_files_cells %>%
+  left_join(y=regions2update, by = c("Image","Parent"))%>%
+  mutate(new_parent = case_when(
+    Parent %in% c("epithelium_area","stroma_area") ~ Parent,
+    TRUE ~ SegmentClass))%>%
+  drop_na(new_parent)%>%
+  select(-c("ROI","Object.ID","Class","Parent","SegmentClass"))%>%
+  mutate(Parent = as.factor(new_parent))%>%
+  select(-new_parent)%>%
+  rename(Class = Name)%>%
+  relocate(c(wsi,flow,pred,dataset),.before = Class)
+
+```
+
+
+```{r}
+# Join with sample data and process
+attn_cell <- left_join(datase_collected_files_cells_clean, sample_data %>% select(slide_id, progression) %>% rename(wsi = slide_id), by = "wsi") %>%
+  mutate(across(c(flow, pred, wsi, Image, Parent, Class, dataset), as.factor))
+
+# Write final output
+# write.csv(attn_cell, file.path(export_folder, "cell_attn_250527.csv"), row.names = FALSE)
+saveRDS(attn_cell, file.path(export_folder, "cell_level_250808.RDS"))
+```
+
+
+
+```{r}
+
+
+```
+

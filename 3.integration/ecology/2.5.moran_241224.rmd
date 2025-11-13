@@ -1,0 +1,652 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# import
+
+```{r}
+library(spdep)
+library(dplyr)
+library(sf)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(future)
+library(furrr)
+plan(multisession, workers = 23)
+options(future.globals.maxSize = 2^33)
+
+fix_path <- function(path){
+  os_type <- Sys.info()["sysname"]
+  if (os_type == "Windows"){
+    path <- gsub("/rsrch5", "//d1prprsh5ccifs", path)
+  } else if(os_type == "Linux"){
+    path <- gsub("//d1prprsh5ccifs", "/rsrch5", path)
+    path <- gsub("B:/", "/rsrch5/home/trans_mol_path/cercan/", path)
+  } else {
+    
+  }
+  return(path)
+}
+
+
+```
+
+
+
+
+```{r region based calculation}
+
+# data <- read.csv("/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/merged/collected_cell_data.csv")
+spatial_folder = "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/"
+
+# spatial_folder = "B:/BE_master/3.integration/integration_project/spatial_analysis/"
+# 
+# load(file.path(spatial_folder, "merged/region_level.RData"))
+# 
+# load(paste0(spatial_folder, "merged/region_level.RData"))
+region_level <- readRDS(file.path(spatial_folder, "tabular/merged/","region_level_expanded_250808.RDS"))
+
+
+  # region_level$X <- as.numeric(sub("_.*", "", region_level$Parent))
+  # region_level$Y <- as.numeric(sub(".*_", "", region_level$Parent))
+# region_level_filtered_toSquares <- region_level%>%
+#   filter(Parent == "Image")%>%
+#   drop_na(attention_score)
+
+```
+
+# local calculation
+
+```{r local functions}
+# Function to calculate local Moran's I
+calculate_localMoran <- function(data_group, cell_type) {
+  coords <- st_coordinates(data_group)
+  immune_counts <- data_group[[cell_type]]
+  cell_type_name <- substr(cell_type, 5, nchar(cell_type))
+  region_id <- data_group$Parent
+
+  # Create neighbor matrix
+  nb <- dnearneigh(coords, d1 = 0, d2 = 200)
+
+  # Convert neighbor matrix to spatial weights
+  weights <- nb2listw(nb, style = "B", zero.policy = TRUE)
+
+  # Calculate local Moran's I
+  local_moran <- localmoran(immune_counts, weights, zero.policy = TRUE)
+
+  local_moran_Ii <- as.numeric(local_moran[, 1]) # Local Moran's I
+  local_moran_p_value <- as.numeric(local_moran[, 5]) # Local Moran's p-value
+  local_moran_p_adj <- p.adjust(as.numeric(local_moran[, 5]), method = "bonferroni") # Adjusted p-value
+  
+  local_moran_Ii <- ifelse(local_moran_p_value <= 0.05, local_moran_Ii, 0)
+
+  # Combine results into a tibble
+  tibble(
+    Image = first(data_group$Image),
+    region_id = region_id,
+    attn_class_extended = data_group$attn_class_extended,
+    !!paste0("Moran_Local_", cell_type_name, "_Ii") := local_moran_Ii
+    # !!paste0("Moran_Local_", cell_type_name, "_pval") := local_moran_p_value,
+    # !!paste0("Moran_Local_", cell_type_name, "_padj") := local_moran_p_adj
+  )
+}
+
+# Main function to process the region level data
+process_region_level_moran <- function(region_level, cell_type_list) {
+  spatial_data <- st_as_sf(region_level, coords = c("X", "Y"), crs = 3857)
+
+  wsi_results <- NULL
+  for (cell_type in cell_type_list) {
+    # Calculate local Moran's I for the current cell type
+    moran_results <- spatial_data %>%
+      group_split(Image, .keep = T) %>%
+      map_df(~ calculate_localMoran(.x, cell_type))
+
+    if (is.null(wsi_results)) {
+      wsi_results <- moran_results
+    } else {
+      wsi_results <- left_join(wsi_results, moran_results, by = c("Image", "region_id", "attn_class_extended"))
+    }
+  }
+
+  return(wsi_results)
+}
+
+# Process the region level data for each wsi in parallel
+process_single_wsi_moran <- function(wsi, region_level, cell_type_list) {
+  wsi_data <- region_level %>% filter(wsi == !!wsi)
+  # print(paste0("Running ", wsi))
+  data_with_moran <- process_region_level_moran(wsi_data, cell_type_list)
+  return(data_with_moran)
+}
+
+```
+
+
+
+
+```{r local calculation}
+
+# Example usage
+cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+unique_wsis <- unique(region_level$wsi)
+# Assuming region_level_filtered_toSquares is your filtered dataset
+wsi_level_moran <- future_map(unique_wsis, ~ process_single_wsi_moran(.x, region_level, cell_type_list)) %>%
+  bind_rows()
+
+write.csv(wsi_level_moran, file.path(spatial_folder, "tabular","intermediate", "moran_local_raw.csv"))
+
+```
+
+
+```{r local attn_specific mean}
+
+# Calculate mean local Moran's I for different attention groups
+summary_local_results_moran <- data.frame(Image = character())
+cell_type_list_df <- c("Lymphocyte", "Plasma", "LymphoPlasma", "Immune")
+
+for (attn_group in c(0, 1, 2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- wsi_level_moran %>% filter(attention_score < 0.5)
+  } else if (attn_group == 1) {
+    filtered_data <- wsi_level_moran %>% filter(attention_score >= 0.5)
+  } else {
+    filtered_data <- wsi_level_moran
+  }
+
+  # for (cell_type in cell_type_list_df) {
+    # Calculate the mean for each cell type and attention group
+    attn_cell_mean <- filtered_data %>%
+      mutate(across(starts_with("Ripley_L12_"), ~ {
+      .x[is.infinite(.x) | is.nan(.x)] <- NA_real_
+      .x
+    })) %>%
+      group_by(Image) %>%
+      summarise(
+        across(starts_with("Moran_Local_"), ~ mean(.x[.x > 0], na.rm = TRUE), .names = "{.col}_clustered_mean"),
+        across(starts_with("Moran_Local_"), ~ mean(abs(.x[.x < 0]), na.rm = TRUE), .names = "{.col}_dispersed_mean"), 
+        across(starts_with("Moran_Local_"), ~ sd(.x, na.rm = TRUE), .names = "{.col}_clustering_heterogeneity"),
+        across(starts_with("Moran_Local_"), ~ mean(abs(.x), na.rm = TRUE), .names = "{.col}_abs_mean"),
+        across(starts_with("Moran_Local_"), ~ max(abs(.x), na.rm = TRUE), .names = "{.col}_abs_max"),
+        .groups = "drop") %>%
+      rename_with(~ paste0(.x, "_attn", attn_group), starts_with("Moran_Local_"))
+    
+    
+
+    # Join the results
+    summary_local_results_moran <- full_join(attn_cell_mean, summary_local_results_moran, by = "Image")
+  
+}
+
+
+
+# Replace NA values with 0
+summary_local_results_moran <- summary_local_results_moran %>%
+  mutate(across(starts_with("Moran_Local_"), ~ replace_na(., 0)))
+
+
+summary_local_results_moran <- summary_local_results_moran %>%
+  select(-all_of(ends_with(".y")))%>%
+  rename_with(~ str_remove(., ".x"), ends_with(".x"))%>%  
+  select(where(~ !all(. %in% c(0, Inf, -Inf))))
+
+
+```
+
+# global part
+
+
+```{r global}
+calculate_global_Moran <- function(data_group, cell_type) {
+  coords <- st_coordinates(data_group)
+  immune_counts <- data_group[[cell_type]]
+  cell_type_name <- substr(cell_type, 5, nchar(cell_type))
+
+    # Create neighbor matrix
+    nb <- dnearneigh(coords, d1 = 0, d2 = 200)
+
+  if (length(immune_counts) == 0 || length(nb) == 0) {
+    global_moran <- 0
+  }else{
+      # Convert neighbor matrix to spatial weights
+      weights <- nb2listw(nb, style = "B", zero.policy = TRUE)
+
+      # Calculate Moran's I statistics
+      global_moran_df <- moran.test(immune_counts, weights, zero.policy = TRUE)
+
+      global_moran <- if (global_moran_df$p.value <= 0.05) {
+      as.numeric(global_moran_df$estimate[1])  # Extract numeric value
+      } else {
+        0
+      }
+  }
+
+  tibble(
+    Image = first(data_group$Image),
+    !!paste0("GlobalMoran_", cell_type_name) := global_moran
+  )
+}
+
+process_global <- function(region_level, cell_type_list) {
+  spatial_data <- st_as_sf(region_level, coords = c("X", "Y"), crs = 3857)
+  wsi_results <- NULL
+
+  for (cell_type in cell_type_list) {
+    # Use safely to handle errors in calculate_global_Moran
+    safe_calculate_global_Moran <- safely(calculate_global_Moran)
+
+    # Calculate Moran's I for the current cell type
+    globalmoran_results <- spatial_data %>%
+      group_by(Image) %>%
+      group_split() %>%
+      map_df(~ {
+        result <- safe_calculate_global_Moran(.x, cell_type)
+        if (is.null(result$error)) {
+          return(result$result)
+        } else {
+          message("Skipping a group due to error: ", result$error$message)
+          return(NULL)
+        }
+      }) %>%
+      bind_rows() %>%
+      filter(!is.na(Image))  # Ensure we only keep valid results
+
+    # Add the Moran's I results as new columns to the main data frame
+    if (is.null(wsi_results)) {
+      wsi_results <- globalmoran_results
+    } else {
+      wsi_results <- left_join(wsi_results, globalmoran_results, by = "Image")
+    }
+  }
+  return(wsi_results)
+}
+
+process_single_wsi_global <- function(wsi, region_level) {
+  tryCatch({
+    wsi_data <- region_level %>% filter(Image == !!wsi)
+    data_with_moran <- process_global(wsi_data, cell_type_list)
+    return(data_with_moran)
+  }, error = function(e) {
+    message("Error processing wsi ", wsi, ": ", e$message)
+    # Return a tibble with the expected structure but with NA values
+    return(tibble(Image = as.character(wsi)))
+  })
+}
+```
+
+
+```{r run global}
+cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+
+global_moran <- data.frame(Image = unique_wsis)
+for (attn_group in c(0, 1,2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- region_level %>% filter(attention_score < 0.5)
+  } else if (attn_group == 1) {
+    filtered_data <- region_level %>% filter(attention_score >= 0.5)
+  } else {
+    filtered_data <- region_level
+  }
+
+  # Process each wsi and collect results
+  global_moran_attn <- future_map(
+    unique(filtered_data$Image),
+    ~ process_single_wsi_global(.x, filtered_data),
+    .options = furrr_options(seed = TRUE),
+    .progress = TRUE
+  ) %>%
+    bind_rows() %>%
+    rename_with(~ paste0(., "_attn", attn_group), starts_with("GlobalMoran_"))
+
+  # Combine results
+  global_moran <- global_moran_attn %>%
+  mutate(across(starts_with("Global"), ~ bit::unattr (.x))) %>%
+  left_join(.,y=global_moran, by = "Image") 
+  
+}
+
+
+
+global_moran_df <- global_moran %>%
+  bind_rows() %>%
+  mutate(across(all_of(starts_with("GlobalMoran_")), ~ replace_na(., 0)))
+```
+
+
+```{r merge local-global}
+
+wsi_df <- region_level%>%
+  mutate(wsi = substr(Image,0,5))%>%
+    select(wsi, progression, pred, dataset)%>%
+    distinct()
+
+moran_merged  <- left_join(summary_local_results_moran, global_moran_df, by = "Image")%>%
+  mutate(wsi = substr(Image, 0,5))%>%
+  select(-Image) 
+
+
+write.csv(moran_merged,"/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/moran.csv",row.names = F)
+
+```
+
+
+# narrow tile
+
+```{r}
+
+spatial_folder = "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/"
+region_level_edited <- readRDS(file.path(spatial_folder, "tabular/merged/","region_level_processed_250808.RDS"))
+plan(multisession, workers = 23)
+
+
+cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+unique_wsis <- unique(region_level_edited$wsi)
+```
+
+```{r}
+wsi_level_moran <- future_map(unique_wsis, ~ process_single_wsi_moran(.x, region_level_edited, cell_type_list)) %>%
+  bind_rows()
+```
+
+
+```{r}
+summary_local_results_moran <- data.frame(Image = character())
+cell_type_list_df <- c("Lymphocyte", "Plasma", "LymphoPlasma", "Immune")
+
+for (attn_group in c(0, 1, 2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- wsi_level_moran %>% filter(attn_class_extended == 0)
+  } else if (attn_group == 1) {
+    filtered_data <- wsi_level_moran %>% filter(attn_class_extended == 1)
+  } else {
+    filtered_data <- wsi_level_moran
+  }
+
+  # for (cell_type in cell_type_list_df) {
+    # Calculate the mean for each cell type and attention group
+    attn_cell_mean <- filtered_data %>%
+      mutate(across(starts_with("Moran_Local_"), ~ case_when(
+    is.nan(.x) ~ NA,           # NaN -> 0
+    .x == Inf ~ NA,            # Positive infinity -> 0
+    .x == -Inf ~ NA,           # Negative infinity -> 0
+    TRUE ~ .x                 # Keep original value
+  ))) %>%
+      group_by(Image) %>%
+      summarise(
+        across(starts_with("Moran_Local_"), ~ mean(.x[.x > 0], na.rm = TRUE), .names = "{.col}_clustered_mean"),
+        across(starts_with("Moran_Local_"), ~ mean(abs(.x[.x < 0]), na.rm = TRUE), .names = "{.col}_dispersed_mean"), 
+        across(starts_with("Moran_Local_"), ~ sd(.x, na.rm = TRUE), .names = "{.col}_clustering_heterogeneity"),
+        across(starts_with("Moran_Local_"), ~ mean(abs(.x), na.rm = TRUE), .names = "{.col}_abs_mean"),
+        across(starts_with("Moran_Local_"), ~ max(abs(.x), na.rm = TRUE), .names = "{.col}_abs_max"),
+        .groups = "drop") %>%
+      rename_with(~ paste0(.x, "_attn", attn_group), starts_with("Moran_Local_"))
+    
+    
+
+    # Join the results
+    summary_local_results_moran <- full_join(attn_cell_mean, summary_local_results_moran, by = "Image")
+  
+}
+# Replace NA values with 0
+summary_local_results_moran <- summary_local_results_moran %>%
+  mutate(across(starts_with("Moran_Local_"), ~ case_when(
+    is.na(.x) ~ 0,
+    is.nan(.x) ~ 0,           # NaN -> 0
+    .x == Inf ~ 0,            # Positive infinity -> 0
+    .x == -Inf ~ 0,           # Negative infinity -> 0
+    TRUE ~ .x                 # Keep original value
+  )))
+
+```
+
+
+
+```{r run global}
+cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+
+global_moran <- data.frame(Image = unique_wsis)
+for (attn_group in c(0, 1,2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- region_level_edited %>% filter(attn_class_extended == 0)
+  } else if (attn_group == 1) {
+    filtered_data <- region_level_edited %>% filter(attn_class_extended == 1)
+  } else {
+    filtered_data <- region_level_edited
+  }
+
+  # Process each wsi and collect results
+  global_moran_attn <- future_map(
+    unique(filtered_data$Image),
+    ~ process_single_wsi_global(.x, filtered_data),
+    .options = furrr_options(seed = TRUE),
+    .progress = TRUE
+  ) %>%
+    bind_rows() %>%
+    rename_with(~ paste0(., "_attn", attn_group), starts_with("GlobalMoran_"))
+
+  # Combine results
+  global_moran <- global_moran_attn %>%
+  mutate(across(starts_with("Global"), ~ bit::unattr (.x))) %>%
+  left_join(.,y=global_moran, by = "Image") 
+  
+}
+
+
+
+global_moran_df <- global_moran %>%
+  bind_rows() %>%
+  mutate(across(all_of(starts_with("GlobalMoran_")), ~ replace_na(., 0)))
+```
+
+
+```{r merge local-global}
+
+wsi_df <- region_level_edited%>%
+  mutate(wsi = substr(Image,0,5))%>%
+    select(wsi, progression, pred, dataset)%>%
+    distinct()
+
+moran_merged  <- left_join(summary_local_results_moran, global_moran_df, by = "Image")%>%
+  mutate(wsi = substr(Image, 0,5))%>%
+  select(-Image) 
+
+
+write.csv(moran_merged,"/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/moran_tile112_neighbourAttn.csv",row.names = F)
+
+```
+
+
+#plotting
+
+```{r read}
+spatial_folder = "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/"
+
+wsi_Moran<-read.csv(paste0(spatial_folder,"tabular/calculated/","moran.csv"))
+```
+
+```{r local}
+analyse_columns <- names(wsi_Moran)[grepl("^Moran_Local_", names(wsi_Moran))]
+
+plots_folder = file.path(spatial_folder,"plot","moran")
+dir.create(file.path(plots_folder,"progression","intraWsi"), recursive = T)
+dir.create(file.path(plots_folder,"pred"))
+
+```
+
+```{r progression_plot}
+for (pred_condition in c(0,1, "all")) {
+  for (col in analyse_columns) {
+    plot <- wsi_Moran%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . }%>%
+      drop_na(progression)%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Moran ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"progression",paste0("Moran_pred",pred_condition, "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+}
+
+
+# progression
+wsi_Moran_long <- wsi_Moran %>%
+      pivot_longer(cols = analyse_columns)
+
+
+unique_col_names <- unique(substring(analyse_columns, 1, nchar(analyse_columns) - 1))
+p_values_list <- list()
+
+calculate_p_values <- function(data, group_col, value_col) {
+  p_values <- data %>%
+    group_by(!!sym(group_col)) %>%
+    summarise(p_value = wilcox.test(!!sym(value_col) ~ name)$p.value)
+  return(p_values)
+}
+
+
+for (progress_condition in c(0, 1)) {
+  for (unique_col_name in unique_col_names) {
+    filtered_data <- wsi_Moran_long %>%
+      filter(name == paste0(unique_col_name, "0") | name == paste0(unique_col_name, "1"))%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . } %>%
+      # filter(pred == 1) %>%
+      drop_na(progression)%>%
+      mutate(across(all_of(c("progression", "name")), factor))%>%
+      arrange(wsi)
+
+      # comparisons <- combn(unique(levels(filtered_data$progression)), 2, simplify = FALSE)
+      p_values <- calculate_p_values(filtered_data, "progression", "value")
+
+
+
+      # plot <- ggboxplot(filtered_data, 
+      #             x = "progression", 
+      #             y = "value", 
+      #             fill = "name") + 
+      #   stat_compare_means(method = "wilcox.test", 
+      #                      paired = FALSE,
+      #                      comparisons = unique_col_names) +
+      #   labs(title = paste("Density for", unique_col_name, "with pred condition", pred_condition))
+      
+      p  <- ggboxplot(filtered_data,
+                   x = "progression",
+                   y = "value",
+                   fill = "name") +
+      labs(title = paste("Moran for", unique_col_name, "with pred condition", pred_condition)) +
+      stat_compare_means(aes(group = name), method = "wilcox.test")
+
+      # Save the plot to the plots folder
+      ggsave(filename = file.path(plots_folder,"progression", "intraWsi",paste0("Moran_pred", pred_condition, "_", unique_col_name, ".pdf")), 
+             plot = p, width = 8, height = 6)
+
+  }
+}
+
+```
+
+```{r}
+  for (col in analyse_columns) {
+    plot <- wsi_Moran%>%
+      ggboxplot(x = "pred", y = col, fill = "pred") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Moran ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"pred",paste0("Moran", "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+```
+
+```{r global progression_plot}
+pval_columns <- grep("^Global_Moran_.*_pval$", names(wsi_Moran), value = TRUE)
+
+
+wsi_Moran_global <- wsi_Moran%>%
+  select(-starts_with("Moran_Local_"))
+
+
+for (pval_col in pval_columns) {
+  value_col <- gsub("_pval$", "value", pval_col)
+  wsi_Moran_global[[value_col]] <- ifelse(wsi_Moran_global[[pval_col]] >= 0.05, 0, wsi_Moran_global[[value_col]])
+}
+
+val_columns <- grep("^Global_Moran_.*value$", names(wsi_Moran), value = TRUE)
+
+  
+
+for (pred_condition in c(0,1, "all")) {
+  for (col in val_columns) {
+    plot <- wsi_Moran_global%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . }%>%
+      drop_na(progression)%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Moran_Global ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"progression",paste0("Moran_global_pred",pred_condition, "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+}
+
+
+
+
+```
+
+
+
+# obsolete 
+```{r}
+
+plasma_gi_mean_intraroi <- data_with_gi%>%
+  mutate(attn_level = ifelse (attention_score >= 0.5, 1, 0))%>%
+  mutate(attn_level = factor(attn_level))%>%
+  group_by(wsi, Image, pred,progression,attn_level)%>%
+  summarise(mean_Gi = mean(Gi_star))%>%
+  ungroup()
+  
+
+
+plasma_gi_mean_roi <- data_with_gi%>%
+  group_by(wsi, Image, pred,progression)%>%
+  filter(attention_score >= 0.5)%>%
+  summarise(mean_Gi = mean(Gi_star))
+plasma_gi_mean_roi
+
+```
+
+```{r}
+
+plasma_gi_mean_roi%>%
+  filter(pred == 1)%>%
+  mutate(progression = factor(progression))%>%
+  drop_na(progression)%>%
+ggplot(aes(x=progression ,y= mean_Gi))+
+  geom_boxplot(aes(fill=progression))+
+  stat_compare_means(method = "wilcox.test", paired = FALSE) 
+
+
+pval <- compare_means(mean_Gi ~ attn_level, 
+                      data = plasma_gi_mean_intraroi%>%filter(pred == 1), 
+                      paired = TRUE)
+
+
+plasma_gi_mean_intraroi%>%
+  filter(pred == 1)%>%
+  ggplot(aes( x= attn_level ,y= mean_Gi))+
+  geom_boxplot()+
+  stat_pvalue_manual(pval, y.position = max(plasma_gi_mean_intraroi$mean_Gi, na.rm=TRUE) +0.5)
+
+
+
+```
+
+

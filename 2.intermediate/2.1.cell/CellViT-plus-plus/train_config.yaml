@@ -1,0 +1,133 @@
+# Paths below are placeholders rooted at <BE_MASTER> (the data root) — substitute your own path
+# before running; this plain YAML config is not env-var-expanded by the training code.
+logging:
+  mode: offline
+  project: cellvit++
+  notes: cellvit++
+  log_comment: cellvit++
+  wandb_dir: <BE_MASTER>/2.intermediate/2.1.nucleus/cellvit/logs_local
+  log_dir: <BE_MASTER>/2.intermediate/2.1.nucleus/cellvit/logs_local
+  level: Debug
+
+sweep:
+  method: bayes
+  name: experimental_sweep
+  metric:
+    goal: maximize
+    name: AUROC/Validation
+  run_cap: 2
+
+
+random_seed: 19
+
+gpu: 0
+
+data:
+  dataset: PanNuke #SegmentationDataset
+  dataset_path: <BE_MASTER>/2.intermediate/2.1.nucleus/training/qp_proj/finetune_anns/
+  normalize_stains_train: false
+  normalize_stains_val: false
+  num_nuclei_classes: 2
+  num_tissue_classes: 0
+  train_filelist: <BE_MASTER>/2.intermediate/2.1.nucleus/training/qp_proj/finetune_anns/splits/train.csv
+  val_filelist: <BE_MASTER>/2.intermediate/2.1.nucleus/training/qp_proj/finetune_anns/splits/val.csv
+  test_filelist: <BE_MASTER>/2.intermediate/2.1.nucleus/training/qp_proj/finetune_anns/splits/test.csv
+  label_map:
+    0: "background"
+    1: "nucleus"
+  input_shape: 256
+  
+dataset_config:
+  nuclei_types:
+    background: 0
+    nucleus: 1
+
+model:
+  pretrained_encoder: <PATH_TO_CELLVIT256_CHECKPOINT>/CellViT-256-x40-AMP.pth
+  backbone: ViT256
+  # parameters:
+  #   hidden_dim:
+  #     values: [128, 256, 512]
+  # hidden_dim: 128
+
+training:
+  cache_cell_dataset: true
+  batch_size: 8
+  epochs: 200
+  drop_rate: 0
+  optimizer: AdamW
+  unfreeze_epoch: 5
+  sampling_gamma: 0.85
+  sampling_strategy: cell
+  optimizer_hyperparameter:
+    betas: [0.85, 0.9]
+    lr: 0.0001
+    weight_decay: 0.0001 
+    # parameters:
+    #   lr:
+    #     min: 0.00001
+    #     max: 0.01
+    #   weight_decay:
+    #     min: 0.00001
+    #     max: 0.001
+  early_stopping_patience: 20
+  scheduler:
+    scheduler_type: constant
+    # parameters:
+    #   scheduler_type:
+    #     values: [constant, exponential]
+  mixed_precision: true
+  eval_every: 1
+
+transformations:
+#   randomrotate90:
+#     p: 0.5
+#   horizontalflip:
+#     p: 0.5
+#   verticalflip:
+#     p: 0.5
+  # downscale:
+  #   p: 0.15
+  #   scale: 0.1
+  # blur:
+  #   p: 0.2
+  #   blur_limit: 10
+  # gaussnoise:
+  #   p: 0.25
+  #   var_limit: 50
+  # colorjitter:
+  #   p: 0.2
+  #   scale_setting: 0.25
+  #   scale_color: 0.1
+  # superpixels:
+  #   p: 0.1
+  # zoomblur:
+  #   p: 0.1
+
+  loss:
+  nuclei_binary_map:
+    focaltverskyloss:
+      loss_fn: FocalTverskyLoss
+      weight: 1
+    dice:
+      loss_fn: dice_loss
+      weight: 1
+  hv_map:
+    mse:
+      loss_fn: mse_loss_maps
+      weight: 2.5
+    msge:
+      loss_fn: msge_loss_maps
+      weight: 8
+  # nuclei_type_map:
+  #   bce:
+  #     loss_fn: xentropy_loss
+  #     weight: 0.5
+  #   dice:
+  #     loss_fn: dice_loss
+  #     weight: 0.2
+  #   mcfocaltverskyloss:
+  #     loss_fn: MCFocalTverskyLoss
+  #     weight: 0.5
+  #     args:
+  #       num_classes: 6

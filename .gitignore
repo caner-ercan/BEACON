@@ -1,0 +1,15 @@
+.*
+_*/
+!/.gitignore
+/2025.11.11.25339952v1.full.pdf
+
+# Python bytecode cache (not covered by `.*` above, since it doesn't start with a dot)
+__pycache__/
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+*.xdv

@@ -1,0 +1,29 @@
+% Please add the following required packages to your document preamble:
+% \usepackage{multirow}
+% \usepackage[table,xcdraw]{xcolor}
+% Beamer presentation requires \usepackage{colortbl} instead of \usepackage[table,xcdraw]{xcolor}
+\documentclass{article}
+\usepackage[paperheight=9cm,paperwidth=17.5cm,margin=0.5cm]{geometry}
+\pagestyle{empty}  % Remove page numbers\usepackage{multirow}  % For multirow cells
+\usepackage[table,xcdraw]{xcolor}  % For coloring cells
+\usepackage{caption}  % For captions
+\usepackage{booktabs}
+\usepackage{makecell}
+
+\begin{document}
+
+\begin{table}[htbp]
+\centering
+% \caption{}
+\begin{tabular}{@{}llll@{}}
+\toprule
+& Dice & Jaccard & F1-score *\\
+\midrule
+Test & 0.835 & 0.718 & 0.763 \\
+Validation & 0.830 & 0.710 & 0.801 \\
+Train & 0.807 & 0.693 & 0.713 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

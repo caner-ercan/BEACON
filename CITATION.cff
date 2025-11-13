@@ -1,0 +1,54 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the preprint below. If you use the model weights or manual annotations, please also cite the Zenodo record."
+title: "BEACON: Histopathology-based Spatial Profiling of Immune and Molecular Features Predicts Cancer risk in Barrett's Esophagus"
+authors:
+  - family-names: Ercan
+    given-names: Caner
+  - family-names: Pan
+    given-names: Xiaoxi
+  - family-names: Paulson
+    given-names: Thomas G.
+  - family-names: Stachler
+    given-names: Matthew D.
+  - family-names: Akarca
+    given-names: Fahire Göknur
+  - family-names: Grady
+    given-names: William M.
+  - family-names: Maley
+    given-names: Carlo C.
+  - family-names: Yuan
+    given-names: Yinyin
+preferred-citation:
+  type: article
+  title: "Histopathology-based Spatial Profiling of Immune and Molecular Features Predicts Cancer risk in Barrett's Esophagus"
+  authors:
+    - family-names: Ercan
+      given-names: Caner
+    - family-names: Pan
+      given-names: Xiaoxi
+    - family-names: Paulson
+      given-names: Thomas G.
+    - family-names: Stachler
+      given-names: Matthew D.
+    - family-names: Akarca
+      given-names: Fahire Göknur
+    - family-names: Grady
+      given-names: William M.
+    - family-names: Maley
+      given-names: Carlo C.
+    - family-names: Yuan
+      given-names: Yinyin
+  journal: medRxiv
+  year: 2025
+  doi: "10.1101/2025.11.11.25339952"
+  url: "https://www.medrxiv.org/content/early/2025/11/13/2025.11.11.25339952"
+identifiers:
+  - type: doi
+    value: "10.1101/2025.11.11.25339952"
+    description: Preprint (medRxiv)
+  - type: doi
+    value: "10.5281/zenodo.17583572"
+    description: Model weights and manual annotations (Zenodo)
+repository-code: "https://github.com/caner-ercan/BEACON"
+license: GPL-3.0
+license-url: "https://github.com/caner-ercan/BEACON/blob/main/LICENSE"

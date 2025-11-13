@@ -1,0 +1,497 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r import, message=FALSE, warning=FALSE}
+setwd(file.path(BE_MASTER, "3.integration"))
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(pracma)
+library(spatstat)
+library(tidyr)
+library(furrr)
+library(purrr)
+
+BE_MASTER <- Sys.getenv("BE_MASTER", unset = NA_character_)
+if (is.na(BE_MASTER)) stop("Set the BE_MASTER environment variable to the data root")
+
+
+
+
+```
+
+
+```{r}
+
+# integration_project_path = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/merged/")
+integration_project_path =file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/merged/")
+# ripley
+
+attn_cell <- readRDS(file.path(integration_project_path,"cell_level_250808.RDS"))
+
+# write.csv(attn_cell,file.path(integration_project_path,"cell_attn_250317.csv"))
+# attn_cell <- read.csv(file.path(integration_project_path,"cell_attn_250317.csv"))
+
+
+
+wsi_df <- attn_cell%>%
+    select(wsi, progression, pred, dataset)%>%
+    distinct()
+  
+
+```
+
+
+```{r }
+
+create_window <- function(df) {
+  x_range <- range(df$Centroid.X.µm)
+  y_range <- range(df$Centroid.Y.µm)
+  owin(xrange = x_range, yrange = y_range)  # Create spatial window
+}
+
+create_ppp_list <- function(attn_cell, attn = 2){
+  # attn 2 means all, 1 means high, 0 means low regions
+  attn_cell_dataset <- attn_cell%>%
+    # filter(dataset == !!dataset)%>%
+    {if (attn == 1) filter(., attention_score >= 0.5) 
+     else if (attn == 0) filter(., attention_score < 0.5) 
+     else .}
+  
+  # str(attn_cell_dataset)
+
+  
+  attn_cell_dataset <- attn_cell_dataset %>%
+    filter(Class %in% c("Lymphocyte", "Plasma")) %>%
+    mutate(Class = "Lymph.Plasma") %>%
+    bind_rows(attn_cell_dataset)
+
+  attn_cell_dataset <- attn_cell_dataset %>%
+    filter(Class %in% c("Eosinophil", "Lymphocyte", "Neutrophil", "Plasma")) %>%
+    mutate(Class = "Immune") %>%
+    bind_rows(attn_cell_dataset)
+  
+  attn_cell_dataset$Class <- as.factor(attn_cell_dataset$Class)
+  attn_cell_dataset_images <- attn_cell_dataset %>%
+    select(Image) %>%
+    mutate(Image = as.character(Image))%>%
+    unique()
+
+  ppp_list <- attn_cell_dataset %>%
+    group_by(Image) %>%
+    group_map(~ {
+      win <- create_window(.x)  # Create window for each slide
+      ppp(x = .x$Centroid.X.µm, y = .x$Centroid.Y.µm, marks = .x$Class, window = win, checkdup=FALSE)
+    })
+
+  for (i in seq_along(ppp_list) ){
+    ppp_list[[i]][["Image"]] = attn_cell_dataset_images$Image[i]
+  }
+  return(ppp_list)
+}
+
+
+
+```
+
+
+
+
+
+```{r}
+calculate_ripley <- function(ppp_obj, cell_type1, cell_type2) {
+  img_name <- ppp_obj$Image
+
+  if (sum(marks(ppp_obj) == cell_type1) == 0 || sum(marks(ppp_obj) == cell_type2) == 0) {
+    warning(glue::glue("Skipping image {img_name} - missing {cell_type1} or {cell_type2}"))
+    return(NULL)
+  }
+
+  K12 <- Kcross(ppp_obj, i = cell_type1, j = cell_type2, correction = "Ripley")
+  L12 <- sqrt(K12$iso / pi) - K12$r
+  # auc <- trapz(K12$r, L12)
+
+  # Return long-form result (not wide)
+  tibble::tibble(
+    Image = img_name,
+    r = K12$r,
+    K12 = K12$iso,
+    L12 = L12,
+    # AUC_L12 = auc,
+    cell_type1 = cell_type1,
+    cell_type2 = cell_type2
+  )
+}
+
+trapz <- function(x, y) {
+  sum(diff(x) * (y[-length(y)] + y[-1]) / 2)
+}
+
+
+
+
+get_ripley_results <- function(ppp_list, wsi) {
+  cell_pairs <- list(
+    c("Epithelial", "Stroma"),
+    c("Epithelial", "Immune"),
+    c("Epithelial", "Lymph.Plasma"),
+    c("Epithelial", "Lymphocyte"),
+    c("Epithelial", "Plasma"),
+    c("Immune", "Stroma"),
+    c("Lymph.Plasma", "Stroma"),
+    c("Lymphocyte", "Stroma"),
+    c("Plasma", "Stroma")
+  )
+
+  pair_df <- tibble::tibble(
+    cell_type1 = sapply(cell_pairs, `[[`, 1),
+    cell_type2 = sapply(cell_pairs, `[[`, 2)
+  )
+
+  results_list <- purrr::pmap(pair_df, function(cell_type1, cell_type2) {
+    # message(glue::glue("Computing Ripley for {cell_type1} vs {cell_type2}"))
+    result_list <- lapply(ppp_list, calculate_ripley, cell_type1, cell_type2)
+    bind_rows(Filter(Negate(is.null), result_list))
+  })
+
+  # Combine all results as long-format
+  results_df <- bind_rows(results_list)
+  if(nrow(results_df)>0){
+    results_df <- results_df%>%
+      mutate(r = round(r, digits = 1))%>%
+      mutate(wsi = substr(Image,0,5))%>%
+      mutate(cell_pair = paste0(cell_type1,"_",cell_type2))%>%
+      select(-c(cell_type1,cell_type2, Image))%>%
+      pivot_wider(names_from = cell_pair,
+                   values_from = c(L12,K12),
+                   names_glue = "Ripley_{.value}_{cell_pair}")
+  
+  
+
+  }else{
+    results_df <- data_frame()
+  }
+
+  return(results_df)
+  
+}
+
+summarize_stats <- function(results_df, wsi_df){
+  summary_stats <- results_df %>%
+    mutate(across(starts_with("Ripley_L12_"), ~ {
+      .x[is.infinite(.x) | is.nan(.x)] <- NA_real_
+      .x
+    })) %>%
+    group_by(wsi) %>%
+    summarise(#across(starts_with("Ripley_K12_"), ~ mean(.x, na.rm = TRUE), .names = "{col}_mean"),
+              across(starts_with("Ripley_L12_"), ~ trapz(r, .x), .names = "{col}_AUC"),
+              across(starts_with("Ripley_L12_"), ~ mean(.x, na.rm = TRUE), .names = "{col}_mean"),
+              across(starts_with("Ripley_L12_"), ~ max(.x, na.rm = TRUE), .names = "{col}_max"),
+              across(starts_with("Ripley_L12_"), ~ min(.x, na.rm = TRUE), .names = "{col}_min"),
+              across(starts_with("Ripley_L12_"), ~ sd(.x, na.rm = TRUE), .names = "{col}_sd"),
+              across(starts_with("Ripley_L12_"), ~ mean(.x > 0, na.rm = TRUE), .names = "{col}_frac_positive"),
+              # auc area above zero - FIXED
+              across(starts_with("Ripley_L12_"), ~ {
+                if(all(is.na(.x))) return(NA)
+                pos_vals <- pmax(.x, 0, na.rm = TRUE)
+                pos_indices <- !is.na(.x) & .x > 0
+                if(sum(pos_indices, na.rm = TRUE) > 1) {
+                  trapz(r[pos_indices], pos_vals[pos_indices])
+                } else {
+                  0
+                }
+              }, .names = "AUC_positive_{col}"),
+              # Zero-crossing distance - FIXED
+              across(starts_with("Ripley_L12_"), ~ {
+                if(all(is.na(.x))) return(NA)
+                valid_vals <- !is.na(.x)
+                if(sum(valid_vals) < 2) return(NA)
+                
+                clean_vals <- .x[valid_vals]
+                clean_r <- r[valid_vals]
+                zero_crossings <- which(diff(sign(clean_vals)) != 0)
+                if(length(zero_crossings) > 0) {
+                  clean_r[zero_crossings[1] + 1]  
+                } else {
+                  NA_real_
+                }
+              }, .names = "{col}_zero_crossing"),
+              .groups = "drop")
+
+  summary_stats <- left_join(wsi_df, summary_stats, by = "wsi")
+  return(summary_stats)
+}
+  
+```
+
+
+
+
+```{r}
+ppp_list <- create_ppp_list(attn_cell)
+
+# output <- get_ripley_results(ppp_list, attn_cell)
+options(future.globals.maxSize = 1024 * 2^20)
+plan(multisession, workers = 23)
+
+process_ppp <- function(ppp_obj, attn_data) {
+  tryCatch({
+    get_ripley_results(list(ppp_obj), attn_data)
+  }, error = function(e) {
+    warning(glue::glue("Error processing ppp for image {ppp_obj$Image}: {e$message}"))
+    return(data.frame())  # Return empty data.frame instead of NULL
+  })
+}
+
+results_lists <- future_map(ppp_list, ~ process_ppp(.x, wsi_df))
+results <- results_lists %>%
+  bind_rows()
+
+summary_stats <- summarize_stats(results,wsi_df)
+```
+
+
+```{r}
+integration_calculated_path = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated/")
+integration_intermediate_path = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/intermediate/")
+
+# write.csv(summary_stats, file.path(integration_intermediate_path, "ripley_summary.csv"), row.names = F)
+# write.csv(results, file.path(integration_intermediate_path, "ripley_results.csv"), row.names = F)
+saveRDS(summary_stats
+        , file.path(integration_intermediate_path, "ripley_summary.RDS"))
+saveRDS(results
+        , file.path(integration_intermediate_path, "ripley_results.RDS"))
+
+
+```
+
+```{r plots}
+
+ripley_plots_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/plot/ripley/")
+
+# Create a directory for plots if it doesn't exist
+if (!dir.exists(ripley_plots_folder)) {
+  dir.create(ripley_plots_folder, recursive = T)
+}
+
+summary_L12_columns <- names(summary_stats)[grepl("^Ripley_L12_", names(summary_stats))]
+
+for (dataset_condition in c("all", "NU", "MDA")) {
+  for (col in summary_L12_columns) {
+    plot <- summary_stats%>%
+      { if (dataset_condition != "all") filter(., dataset == dataset_condition) else . }%>%
+    filter(pred ==1)%>%
+      drop_na(progression)%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Ripley L ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = paste0(ripley_plots_folder, "ripleyL_",dataset_condition, "_",col, ".pdf"), plot = plot, width = 8, height = 6)
+  }
+}
+
+```
+
+```{r}
+
+
+
+ppp_list_attn1 <- create_ppp_list(attn_cell, attn = 1)
+
+results_lists <- future_map(ppp_list_attn1, ~ process_ppp(.x, wsi_df))
+results_df_attn1 <- map(results_lists, convert_list_columns)%>%
+  bind_rows()
+
+summary_stats_attn1 <- summarize_stats(results_df_attn1,wsi_df)
+
+
+# write.csv(summary_stats_attn1, file.path(integration_intermediate_path, "ripley_summary_attn1.csv"), row.names = F)
+# write.csv(results_df_attn1, file.path(integration_intermediate_path, "ripley_results_attn1.csv"), row.names = F)
+
+saveRDS(summary_stats_attn1
+        , file.path(integration_intermediate_path, "ripley_summary_attn1.RDS"))
+saveRDS(results_df_attn1
+        , file.path(integration_intermediate_path, "ripley_results_attn1.RDS"))
+
+```
+
+
+```{r plots attn1}
+
+# ripley_plots_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/plot/ripley/")
+
+mean_L12_columns <- names(summary_stats_attn1)[grepl("^Ripley_mean_L12", names(summary_stats_attn1))]
+
+# Create a directory for plots if it doesn't exist
+if (!dir.exists(ripley_plots_folder)) {
+  dir.create(ripley_plots_folder)
+}
+
+for (dataset_condition in c("all", "NU", "MDA")) {
+  for (col in mean_L12_columns) {
+    plot <- summary_stats_attn1%>%
+      { if (dataset_condition != "all") filter(., dataset == dataset_condition) else . }%>%
+    filter(pred ==1)%>%
+      drop_na(progression)%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Ripley L ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = paste0(ripley_plots_folder, "ripleyL_attn1",dataset_condition, "_",col, ".pdf"), plot = plot, width = 8, height = 6)
+  }
+}
+
+
+  
+```
+
+
+
+
+```{r attn0 calculate}
+
+
+
+
+ppp_list_attn0 <- create_ppp_list(attn_cell, attn = 0)
+
+results_lists <- future_map(ppp_list_attn0, ~ process_ppp(.x, wsi_df))
+results_df_attn0 <- map(results_lists, convert_list_columns)%>%
+  bind_rows()
+
+summary_stats_attn0 <- summarize_stats(results_df_attn0,wsi_df)
+
+
+
+
+# write.csv(summary_stats_attn0, file.path(integration_intermediate_path, "ripley_summary_attn0.csv"), row.names = F)
+# write.csv(results_df_attn0, file.path(integration_intermediate_path, "ripley_results_attn0.csv"), row.names = F)
+
+saveRDS(summary_stats_attn0
+        , file.path(integration_intermediate_path, "ripley_summary_attn0.RDS"))
+saveRDS(results_df_attn0
+        , file.path(integration_intermediate_path, "ripley_results_attn0.RDS"))
+
+
+
+```
+
+
+```{r plots attn1}
+
+
+summary_stats_attn1<- read.csv(paste0(integration_intermediate_path, "ripley_summary_attn1.csv"))
+summary_stats_attn1$attn <- 1
+summary_stats_attn0<- read.csv(paste0(integration_intermediate_path, "ripley_summary_attn0.csv"))
+summary_stats_attn0$attn <- 0
+
+summary_stats_attn0vs1 <- bind_rows(summary_stats_attn1, summary_stats_attn0)%>%
+  mutate(across(c("wsi", "progression", "pred", "dataset","attn"), as.factor))
+
+
+```
+
+
+
+```{r}
+ripley_plots_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/plot/ripley/0vs1/")
+# dir.create(ripley_plots_folder,showWarnings = TRUE, recursive = T)
+mean_L12_columns <- names(summary_stats_attn0vs1)[grepl("^mean_L12", names(summary_stats_attn0vs1))]
+
+
+for(pred in c(0,1)){
+  
+  for (col in mean_L12_columns) {
+    
+    # Initialize an empty list to store p-values
+    pval_list <- list()
+    
+    # Loop through pred values (0 and 1)
+    pval_df <- data.frame()
+    for (progress_value in c(0, 1)) {
+      
+      # Filter the data for the current pred value
+      filtered_data <- summary_stats_attn0vs1 %>%
+        filter(progression == progress_value) %>%
+        group_by(attn) %>%
+        summarise(mean_L12 = list(get(col)), .groups = 'drop')
+      
+      # Perform the Wilcoxon test
+      wilcox_test_result <- wilcox.test(filtered_data$mean_L12[[1]], filtered_data$mean_L12[[2]], paired = TRUE)
+      pval_progress_df <- data.frame(
+      group1 = progress_value - 0.19 + 1,  
+      group2 = progress_value + 0.19 + 1,  
+      p = wilcox_test_result$p.value, 
+      label = paste("p =", format(wilcox_test_result$p.value, scientific = TRUE, digits=2))  # Format the p-values
+    )
+      pval_df <- bind_rows(pval_progress_df, pval_df)
+    }
+  
+    
+    # Create the boxplot with the p-value annotation
+    plot <- ggplot(summary_stats_attn0vs1, aes_string(x = "pred", y = col)) +
+      geom_boxplot(aes(fill = attn)) +
+      stat_pvalue_manual(pval_df, y.position = max(summary_stats_attn0vs1[[col]], na.rm = TRUE) + 3, label = "label") 
+      labs(title = paste("Boxplot for", col, " prediction ", pred), x = "Progression", y = col) +
+      theme_minimal()
+    
+    # Save the plot
+    ggsave(filename = paste0(ripley_plots_folder, "ripleyL_attn0vs1_pred",pred,"_", col, ".pdf"), plot = plot, width = 8, height = 6)
+  }
+}
+
+```
+
+```{r wsi _ aneuploid vs diploid _ attention 1 }
+  
+
+ripley_plots_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/plot/ripley/aneuploid_vs_diploid/")
+
+mean_L12_columns <- names(summary_stats_attn1)[grepl("^mean_L12", names(summary_stats_attn1))]
+
+# Create a directory for plots if it doesn't exist
+if (!dir.exists(ripley_plots_folder)) {
+  dir.create(ripley_plots_folder)
+}
+
+for (dataset_condition in c("all", "NU", "MDA")) {
+  for (col in mean_L12_columns) {
+    plot <- summary_stats_attn1%>%
+      { if (dataset_condition != "all") filter(., dataset == dataset_condition) else . }%>%
+      ggboxplot(x = "pred", y = col, fill = "pred")+
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Diploid vs Aneuploid Slides Ripley L ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = paste0(ripley_plots_folder, "ripleyL_pred_1vs2_",dataset_condition, "_",col, ".pdf"), plot = plot, width = 8, height = 6)
+  }
+}
+```
+
+
+```{r}
+
+ripley_wsi <- summary_stats%>%
+  left_join(, y= summary_stats_attn0%>%
+              select(-progression,-pred,-dataset)%>%
+              rename_with(~ paste0(.x, "_attn0"), starts_with("Ripley_L12_"))
+            , by = "wsi")%>%
+  left_join(y=summary_stats_attn1%>%
+              select(-progression,-pred,-dataset)%>%
+              rename_with(~ paste0(.x, "_attn1"), starts_with("Ripley_L12_"))
+            , by = "wsi")
+
+
+# write.csv(ripley_wsi, file.path(integration_calculated_path, "ripley_wsi.csv"), row.names = F)
+
+saveRDS(ripley_wsi
+        , file.path(integration_calculated_path, "ripley_wsi.RDS"))
+
+```
+
+

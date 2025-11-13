@@ -1,0 +1,221 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(purrr)
+library(dplyr)
+library(ggplot2)
+library(ggdendro)
+library(pheatmap)
+library(pROC)
+library(glmnet)
+library(tidyr)
+library(caret)
+
+
+BE_MASTER <- Sys.getenv("BE_MASTER", unset = NA_character_)
+if (is.na(BE_MASTER)) stop("Set the BE_MASTER environment variable to the data root")
+csv_folder <- file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated/")
+```
+
+
+```{r}
+moran <- read.csv(file.path(csv_folder,"moran_tile112_neighbourAttn.csv"))
+  # select(-c("pred",  "progression", "dataset"))
+    # select(-ends_with("_pval"))%>%
+  # select(wsi, "pred", "flow", "progression", "dataset",starts_with("Moran"), starts_with("Global"))
+
+  
+ getis <- readRDS(file.path(csv_folder,"getis_tile112_neighbourAttn.RDS"))
+#     select(-ends_with("_pval"))%>%
+#     rename_with(~ paste0("Getis_", .), starts_with("G"))
+morisita <- read.csv(file.path(csv_folder,"morisita.csv"))
+
+nn_gfunc <- read.csv(file.path(csv_folder,"nn_gfunction_wsi.csv"))%>%
+    rename_with(~ ifelse(grepl("^nn_", .), ., paste0("nn_", .)), -wsi)
+  # right_join(x=.,y=morisita%>%
+  #              select(c("wsi", "pred", "flow", "progression", "dataset")),
+  #            by="wsi")
+  # mutate(across(everything(), ~replace(., is.na(.) | is.infinite(.), 0)))
+
+mean_knn <- readRDS(file.path(csv_folder,"meanknn.RDS"))
+  # right_join(x=.,y=morisita%>%
+  #              select(c("wsi", "pred", "flow", "progression", "dataset")),
+  #            by="wsi")
+
+ripley  <- readRDS(file.path(csv_folder,"ripley_wsi.RDS"))%>%
+  select(-c("pred",  "progression", "dataset"))
+  # right_join(x=.,y=morisita%>%
+  #              select(c("wsi",  "flow")),
+  #            by="wsi")
+
+dens <- read.csv(file.path(csv_folder,"density.csv"))%>%
+  select(-c("pred", "flow", "progression", "dataset"))
+
+
+nucleus <- read.csv(file.path(BE_MASTER, "2.intermediate/2.1.nucleus/2_inference_quantification/inference_project/merged_data_summary_wider.csv"))%>%
+   select(-c("X","pred", "flow", "progression", "dataset"))%>%
+    rename_with(~ paste0("nuc_", .), -wsi)
+  
+```
+
+```{r}
+dfs <- list(dens,getis,mean_knn,moran,morisita,nn_gfunc,ripley)
+# dfs <- list(morisita,getis,dens,mean_knn,moran,nn_gfunc,ripley,nucleus)
+
+
+merged_df <- reduce(dfs, function(x, y) left_join(x, y, by = "wsi"))
+
+
+rm(morisita,getis,dens,mean_knn,moran,nn_gfunc,ripley,nucleus)
+```
+
+```{r}
+impute_na <- function(df) {
+  for (col in colnames(df)) {
+    if (grepl("^meanKNN|^NN_Gfunction", col, ignore.case = TRUE)) {
+      # Replace NA with the maximum value for columns starting with "knn" or "nn"
+      max_value <- max(df[[col]], na.rm = TRUE)
+      df[[col]][is.na(df[[col]])] <- max_value
+      df[[col]][is.infinite(df[[col]])] <- max_value
+    } else {
+      # Replace NA with 0 for all other columns
+      df[[col]][is.na(df[[col]])] <- 0
+      df[[col]][is.infinite(df[[col]])] <- 0
+    }
+  }
+  return(df)
+}
+
+merged_df <- impute_na(merged_df)
+
+sd_results <- sapply(merged_df[, 6:ncol(merged_df)], sd)
+zero_sd_columns <- names(sd_results[sd_results == 0])
+writeLines(zero_sd_columns, file.path(csv_folder,"zero_sd_columns_wnuc.txt"))
+merged_df <- merged_df[, !(names(merged_df) %in% zero_sd_columns)]
+
+
+# saveRDS(merged_df, file.path(csv_folder,"merged_ecology_250812_wNuc.RDS"))
+saveRDS(merged_df, file.path(csv_folder,"merged_ecology_250812.RDS"))
+```
+
+
+```{r read df}
+csv_folder <- file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated/")
+merged_df <- readRDS(file.path(csv_folder,"merged_ecology_250812.RDS"))
+```
+
+
+```{r normalise}
+
+standardise_column <- function(df, col_name) {
+  col_data <- df[[col_name]]
+
+  
+  original_stats <- list(
+    mean = mean(col_data, na.rm = TRUE),
+    sd = sd(col_data, na.rm = TRUE),
+    min = min(col_data, na.rm = TRUE),
+    max = max(col_data, na.rm = TRUE),
+    n_missing = sum(is.na(col_data))
+  )
+  
+  # Apply Z-score normalization
+  scaled_col <- scale(col_data, center = TRUE, scale = TRUE)
+
+  # scaled_col <- df %>%
+  #   pull({{ col_name }}) %>%   
+  #   na.omit() %>%              
+  #   scale(center = TRUE, scale = TRUE)  
+
+  
+  # Capture center and scale for reuse in normalization
+  scale_stats <- data.frame(center = attr(scaled_col, "scaled:center"),
+                            scale = attr(scaled_col, "scaled:scale"))
+  
+  return(list(
+    scaled_col = as.numeric(scaled_col),
+    original_stats = original_stats,
+    center = attr(scaled_col, "scaled:center"),
+    scale = attr(scaled_col, "scaled:scale"),
+    zero_variance = FALSE
+  ))
+
+}
+
+
+normalise_df <- function(df) {
+  # Column names start from the 6th column
+  feature_cols <- df%>%
+    select(-wsi,-progression,-flow,-pred,-dataset)%>%
+    colnames(.)
+  
+  # Dataframe to store normalization parameters
+  norm_params <- data.frame(
+    column = character(0),
+    mean = numeric(0),
+    sd = numeric(0),
+    min = numeric(0),
+    max = numeric(0),
+    center = numeric(0),
+    scale = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  df_processed <- df
+
+  for (col in feature_cols) {
+    # Standardize the column
+    result <- standardise_column(df_processed, col)
+
+    # df[[col]] <- result$scaled_col
+    # scale_stats <- result$scale_stats
+    
+    # Store the original stats before normalization for later use
+    col_params <- data.frame(
+      column = col,
+      original_mean = result$original_stats$mean,
+      original_sd = result$original_stats$sd,
+      original_min = result$original_stats$min,
+      original_max = result$original_stats$max,
+      n_missing = result$original_stats$n_missing,
+      center = result$center,
+      scale = result$scale,
+      zero_variance = result$zero_variance
+    )
+
+    
+    # Append the stats to the normalization parameters dataframe
+    norm_params <- rbind(norm_params, col_params)
+    df_processed[[col]] <- result$scaled_col
+
+
+
+  }
+    #impute mean
+    df_processed <- df_processed %>%
+      mutate(across(all_of(feature_cols), ~replace(., is.na(.) | is.infinite(.), 0)))
+  
+  return(list(df = df_processed,
+    norm_params = norm_params))
+}
+
+```
+
+
+```{r}
+norm_result <- normalise_df(merged_df)
+
+merged_df_normalised <- norm_result$df
+norm_params <- norm_result$norm_params
+
+# merged_df_normalised <- impute_na(merged_df_normalised, norm_params)
+
+saveRDS(merged_df_normalised, file.path(csv_folder,"merged_ecology_standardised_250812.RDS"))
+saveRDS(norm_params, file.path(csv_folder,"merged_ecology_standardise_parameters_250812.RDS"))
+
+```
+

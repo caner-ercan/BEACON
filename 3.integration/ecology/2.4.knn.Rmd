@@ -1,0 +1,343 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(FNN)
+library(tidyr)
+library(dplyr)
+library(furrr)
+library(purrr)
+plan(multisession, workers = 23)
+options(future.globals.maxSize = 1024 * 2^20)
+
+BE_MASTER <- Sys.getenv("BE_MASTER", unset = NA_character_)
+if (is.na(BE_MASTER)) stop("Set the BE_MASTER environment variable to the data root")
+integration_project_path =file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/merged/")
+
+# ripley
+# attn_cell <- read.csv(file.path(integration_project_path,"cell_attn_241206.csv"))
+
+attn_cell <- readRDS(file.path(integration_project_path,"cell_level_250808.RDS"))
+
+# attn_cell <- attn_cell %>%
+#   mutate(across(c(flow, pred, wsi, Image, Name, Class, Parent, ROI, dataset), factor))
+```
+
+
+```{r roi level}
+
+calculate_mean_knn_roi <- function(attn_cell, cell_type1, cell_type2, attn = 2) {
+
+  if (cell_type1 == "Immune" || cell_type2 == "Immune") {
+    attn_cell <- attn_cell %>%
+      mutate(Class = case_when(
+        Class %in% c("Lymphocyte", "Plasma", "OtherImmune") ~ "Immune",
+        TRUE ~ Class
+      ))
+  }
+
+  if (cell_type1 == "Lymph.Plasma" || cell_type2 == "Lymph.Plasma") {
+    attn_cell <- attn_cell %>%
+      mutate(Class = case_when(
+        Class %in% c("Lymphocyte", "Plasma") ~ "Lymph.Plasma",
+        TRUE ~ Class
+      ))
+  }
+
+  # Filter based on attention score if needed
+  attn_cell_filtered <- attn_cell %>%
+    {if (attn == 1) filter(., !(Class == cell_type1 & attention_score < 0.5))
+     else if (attn == 0) filter(., !(Class == cell_type1 & attention_score >= 0.5))
+     else .}
+
+  # Group by Image and calculate kNN distances
+  knn_result <- attn_cell_filtered %>%
+    group_by(Image) %>%
+    group_map(~ {
+      # Filter coordinates for cell_type1 and cell_type2
+      coords_class1 <- .x %>%
+        filter(Class == cell_type1) %>%
+        select(Centroid.X.µm, Centroid.Y.µm) %>%
+        mutate(
+          Centroid.X.µm = as.numeric(Centroid.X.µm),
+          Centroid.Y.µm = as.numeric(Centroid.Y.µm)
+        ) %>%
+        as.matrix()
+
+      coords_class2 <- .x %>%
+        filter(Class == cell_type2) %>%
+        select(Centroid.X.µm, Centroid.Y.µm) %>%
+        mutate(
+          Centroid.X.µm = as.numeric(Centroid.X.µm),
+          Centroid.Y.µm = as.numeric(Centroid.Y.µm)
+        ) %>%
+        as.matrix()
+
+      # Check if both classes have points; if not, skip
+      min_length <- min(nrow(coords_class1), nrow(coords_class2))
+      if (min_length == 0) {
+        return(tibble(
+          Image = first(.x$Image),
+          mean_knn = NA,
+          sd_knn = NA,
+          min_knn = NA,
+          max_knn = NA,
+          cv_knn = NA
+        ))
+      }else{
+
+      # Check if there is enough values
+      k <- ifelse(min_length < 10, min_length - 1, 10)
+
+      # mean_knn_12 <- mean(get.knnx(coords_class1, coords_class2, k = k)$nn.dist)
+      tryCatch({
+        knn_distances <- get.knnx(coords_class1, coords_class2, k = k)$nn.dist
+      }, error = function(e) {
+          cat("Error message:", e$message, "\n")
+          return(
+                tibble(
+                  Image = first(.x$Image),
+                  mean_knn = NA,
+                  sd_knn = NA,
+                  min_knn = NA,
+                  max_knn = NA,
+                  cv_knn = NA
+                ))})
+      mean_val <- mean(knn_distances, na.rm = TRUE)
+      sd_val <- sd(knn_distances, na.rm = TRUE)
+
+
+      return(tibble(
+        Image = first(.x$Image),
+        mean_knn = mean_val,
+        sd_knn = sd_val,
+        min_knn = min(knn_distances, na.rm = TRUE),
+        max_knn = max(knn_distances, na.rm = TRUE),
+        cv_knn = ifelse(mean_val > 0, sd_val/mean_val, NA)) #Tissue organization heterogeneity (uniform vs clustered)
+      )}
+    }, .keep = TRUE) %>%
+    bind_rows()
+  
+  return(knn_result)
+}
+
+# Function to get kNN results using parallel processing
+get_knn_results <- function(attn_cell) {
+  attn_groups <- c(0, 1, 2)
+  all_results <- list()
+  
+  for (attn in attn_groups) {
+    # Filter data based on attention score
+    if (attn == 0) {
+      filtered_data <- attn_cell %>% filter(attention_score < 0.5)
+    } else if (attn == 1) {
+      filtered_data <- attn_cell %>% filter(attention_score >= 0.5)
+    } else {
+      filtered_data <- attn_cell
+    }
+    
+    # Epithelial vs Stroma
+    epi_stroma_result <- calculate_mean_knn_roi(filtered_data, "Epithelial", "Stroma", attn)
+    # Add proper column names with attention group suffix
+    colnames(epi_stroma_result)[-1] <- paste0("Epithelial_Stroma_", colnames(epi_stroma_result)[-1], "_attn", attn)
+    all_results[[paste0("Epithelial_Stroma_attn", attn)]] <- epi_stroma_result
+    
+    # Epithelial vs Immune cell classes
+    immune_classes <- c("Immune", "Lymph.Plasma", "Lymphocyte", "Plasma")
+    
+    for (immune_class in immune_classes) {
+      # Epithelial vs Immune
+      epi_immune_result <- calculate_mean_knn_roi(filtered_data, "Epithelial", immune_class, attn)
+      colnames(epi_immune_result)[-1] <- paste0("Epithelial_", immune_class, "_", colnames(epi_immune_result)[-1], "_attn", attn)
+      all_results[[paste0("Epithelial_", immune_class, "_attn", attn)]] <- epi_immune_result
+      
+      # Immune vs Stroma
+      immune_stroma_result <- calculate_mean_knn_roi(filtered_data, immune_class, "Stroma", attn)
+      colnames(immune_stroma_result)[-1] <- paste0(immune_class, "_Stroma_", colnames(immune_stroma_result)[-1], "_attn", attn)
+      all_results[[paste0(immune_class, "_Stroma_attn", attn)]] <- immune_stroma_result
+    }
+  }
+  
+  # Combine all results by Image first, then aggregate by wsi
+  combined_results <- all_results %>%
+  keep(~ nrow(.x) > 0) %>%  # Remove empty dataframes
+  reduce(function(x, y) full_join(x, y, by = "Image"))
+  
+  # Add wsi column and aggregate
+  results_df <- combined_results %>%
+    mutate(wsi = substr(Image, 1, 5)) %>%
+    select(-Image) %>%
+    group_by(wsi) %>%
+    summarise(across(everything(), ~ mean(.x, na.rm = TRUE)), .groups = "drop")
+  
+  return(results_df)
+}
+
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+summary_knn <- attn_cell%>%
+  get_knn_results()
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+export_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated")
+saveRDS(mean_knn, file = file.path(export_folder,"meanknn.RDS"))
+# mean_knn <- read.csv(file.path(export_folder,"meanknn.csv"))
+# mean_knn_NU <- get_knn_results(filter(attn_cell, dataset == "NU"))
+# mean_knn_MDA1 <- get_knn_results(filter(attn_cell, dataset == "MDA1"))
+# mean_knn_MDA2 <- get_knn_results(filter(attn_cell, dataset == "MDA2"))
+
+```
+
+
+
+```{ }
+
+mean_knn_NU <- read.csv(paste0(export_folder,"meanknn_NU.csv"))
+mean_knn_MDA1 <- read.csv(paste0(export_folder,"meanknn_MDA1.csv"))
+mean_knn_MDA2 <- read.csv(paste0(export_folder,"meanknn_MDA2.csv"))
+
+
+
+mean_knn <- rbind(mean_knn_NU, mean_knn_MDA1, mean_knn_MDA2)
+colnames(mean_knn)[colnames(mean_knn) == "Epithelial_Stroma_attn0"] <- "meanKNN_Epithelial_Stroma_attn0"
+colnames(mean_knn)[colnames(mean_knn) == "Epithelial_Stroma_attn1"] <- "meanKNN_Epithelial_Stroma_attn1"
+colnames(mean_knn)[colnames(mean_knn) == "Epithelial_Stroma_attn2"] <- "meanKNN_Epithelial_Stroma_attn2"
+
+```
+
+```{r add clinical}
+# only for once
+
+# spatial_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/")
+# load(paste0(spatial_folder, "tabular/merged/region_level.RData"))
+mean_knn <- attn_cell %>%
+  select(wsi,pred,flow,progression) %>%
+    group_by(wsi)%>%
+  summarise(across(everything(), first))%>%
+  right_join(x=., y=mean_knn,by = "wsi")%>%
+  mutate(across(everything(), ~replace_na(., 0))) 
+  
+
+
+```
+
+```{r}
+export_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated/")
+write.csv(mean_knn, file = paste0(export_folder,"mean_knn.csv"), row.names = F)
+```
+
+# plotting
+
+```{r plot}
+library(ggplot2)
+library(ggpubr)
+library(tidyr)
+library(dplyr)
+export_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/tabular/calculated/")
+mean_knn <- read.csv(file = paste0(export_folder,"mean_knn.csv"))
+```
+
+```{r}
+analyse_columns <- names(mean_knn)[grepl("^meanKNN_", names(mean_knn))]
+
+plots_folder = file.path(BE_MASTER, "3.integration/integration_project/spatial_analysis/plot/knn/")
+dir.create(file.path(plots_folder,"progression","intraWsi"), recursive = T)
+dir.create(file.path(plots_folder,"pred"))
+
+```
+
+
+```{r progression_plot}
+for (pred_condition in c(0,1,"all")) {
+  for (col in analyse_columns) {
+    plot <- mean_knn%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . }%>%
+      drop_na(progression, !!sym(col))%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("knn ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"progression",paste0("meanKNN_pred",pred_condition, "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+}
+
+
+# progression
+mean_knn_long <- mean_knn %>%
+      pivot_longer(cols = analyse_columns)
+
+
+unique_col_names <- unique(substring(analyse_columns, 1, nchar(analyse_columns) - 1))
+p_values_list <- list()
+
+calculate_p_values <- function(data, group_col, value_col) {
+  p_values <- data %>%
+    group_by(!!sym(group_col)) %>%
+    summarise(p_value = wilcox.test(!!sym(value_col) ~ name)$p.value)
+  return(p_values)
+}
+
+
+for (progress_condition in c(0, 1)) {
+  for (unique_col_name in unique_col_names) {
+    filtered_data <- mean_knn_long %>%
+      filter(name == paste0(unique_col_name, "0") | name == paste0(unique_col_name, "1"))%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . } %>%
+      # filter(pred == 1) %>%
+      drop_na(progression)%>%
+      mutate(across(all_of(c("progression", "name")), factor))%>%
+      arrange(wsi)
+
+      # comparisons <- combn(unique(levels(filtered_data$progression)), 2, simplify = FALSE)
+      p_values <- calculate_p_values(filtered_data, "progression", "value")
+
+
+
+      # plot <- ggboxplot(filtered_data, 
+      #             x = "progression", 
+      #             y = "value", 
+      #             fill = "name") + 
+      #   stat_compare_means(method = "wilcox.test", 
+      #                      paired = FALSE,
+      #                      comparisons = unique_col_names) +
+      #   labs(title = paste("Density for", unique_col_name, "with pred condition", pred_condition))
+      
+      p  <- ggboxplot(filtered_data,
+                   x = "progression",
+                   y = "value",
+                   fill = "name") +
+      labs(title = paste("Ripley for", unique_col_name, "with pred condition", pred_condition)) +
+      stat_compare_means(aes(group = name), label = "p.signif", method = "wilcox.test")
+
+      # Save the plot to the plots folder
+      ggsave(filename = file.path(plots_folder,"progression", "intraWsi",paste0("meanKNN_pred", pred_condition, "_", unique_col_name, ".pdf")), 
+             plot = p, width = 8, height = 6)
+
+  }
+  }
+
+```
+
+```{r}
+  for (col in analyse_columns) {
+    plot <- mean_knn%>%
+      ggboxplot(x = "pred", y = col, fill = "pred") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("meanKNN ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"pred",paste0("meanKNN", "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+```

@@ -1,0 +1,105 @@
+
+
+
+
+```{r}
+confusion_matrix_percent <- data.frame(
+  Predicted = c("Lymphocyte", "Plasma", "OtherImmune","Epithelium", "Stroma"),
+  `Lymphocyte` = c(72.4,7.6,5.7,4.1,10.1),
+  `Plasma` = c(42.2,37.8,7.8,3.1,9.1),
+  `OtherImmune` = c(30.2,4.5,21.3,8.9,35.1),
+  `Epithelium` = c(3.2,0.5,0.7,93.4,2.2),
+  `Stroma` = c(22.9,3.0,6.0,5.2,62.9)
+)
+
+# confusion_matrix$Total <- rowSums(confusion_matrix[, -1])
+# 
+# confusion_matrix_percent <- confusion_matrix
+# confusion_matrix_percent[, 2:3] <- confusion_matrix[, 2:3] / confusion_matrix$Total * 100
+
+# Melt the data frame for percentages
+confusion_matrix_melted_percent <- melt(confusion_matrix_percent,
+                                        id.vars = "Predicted",
+                                        variable.name = "Actual",
+                                        value.name = "Percentage")
+
+confusion_matrix_melted_percent <- confusion_matrix_melted_percent %>%
+  mutate(
+    Actual = factor(Actual, levels = c("Lymphocyte", "Plasma", "OtherImmune", "Epithelium", "Stroma")),
+    Predicted = factor(Predicted, levels = c("Lymphocyte", "Plasma", "OtherImmune", "Epithelium", "Stroma"))
+  )
+  
+# Create the plot
+p <- ggplot() +
+  geom_tile(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, fill = Percentage)) +
+  geom_text(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, label = paste0(round(Percentage, 1), "%")),
+            color = "black", size = 4) +
+  scale_fill_gradient(low = "white", high = "darkgreen") +
+  scale_y_discrete(limits = rev) +  # Reverse the order of the y-axis
+  labs(x = "Prediction", y = "Ground Truth") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Increase x-axis text size
+    axis.text = element_text(size = 14.5),
+        legend.position = "none",
+    axis.title = element_text(size = 17.5))
+p
+ggsave(paste0(save_folder,"cm_cell.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+
+```
+
+
+
+```{r}
+confusion_matrix_percent <- data.frame(
+  Predicted = c("Columnar", "Stroma", "Squamous","Background"),
+  `Columnar` = c(91.3,6.5,0.5,1.7),
+  `Stroma` = c(9.9,87.4,0.3,2.3),
+  `Squamous` = c(7.5,13.4,77,2.1),
+  `Background` = c(4.8,1.7,0,93.4)
+)
+
+# confusion_matrix$Total <- rowSums(confusion_matrix[, -1])
+# 
+# confusion_matrix_percent <- confusion_matrix
+# confusion_matrix_percent[, 2:3] <- confusion_matrix[, 2:3] / confusion_matrix$Total * 100
+
+# Melt the data frame for percentages
+confusion_matrix_melted_percent <- melt(confusion_matrix_percent,
+                                        id.vars = "Predicted",
+                                        variable.name = "Actual",
+                                        value.name = "Percentage")
+
+confusion_matrix_melted_percent <- confusion_matrix_melted_percent %>%
+  mutate(
+    Actual = factor(Actual, levels = c("Columnar", "Stroma", "Squamous","Background")),
+    Predicted = factor(Predicted, levels = c("Columnar", "Stroma", "Squamous","Background"))
+  )
+  
+# Create the plot
+p <- ggplot() +
+  geom_tile(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, fill = Percentage)) +
+  geom_text(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, label = paste0(round(Percentage, 1), "%")),
+            color = "black", size = 5) +
+  scale_fill_gradient(low = "white", high = "darkgreen") +
+  scale_y_discrete(limits = rev) +  # Reverse the order of the y-axis
+  labs(x = "Prediction", y = "Ground Truth") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Increase x-axis text size
+    axis.text = element_text(size = 15),
+        legend.position = "none",
+    axis.title = element_text(size = 18))
+p
+ggsave(paste0(save_folder,"cm_segment.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+```
+
+
+
+
+
+
