@@ -1,0 +1,53 @@
+% Please add the following required packages to your document preamble:
+% \usepackage{multirow}
+% \usepackage[table,xcdraw]{xcolor}
+% Beamer presentation requires \usepackage{colortbl} instead of \usepackage[table,xcdraw]{xcolor}
+% compile command: latexmk -xelatex 0.input_dem.tex
+\documentclass{article}
+\usepackage[paperheight=10cm,paperwidth=18cm,margin=0.3cm]{geometry}
+\usepackage{fontspec}
+\setmainfont{Arial}
+\pagestyle{empty}  % Remove page numbers
+\usepackage{multirow}  % For multirow cells
+\usepackage[table,xcdraw]{xcolor}  % For coloring cells
+\usepackage{caption}  % For captions
+\usepackage{booktabs}
+\begin{document}
+\begin{table}[htbp]
+\centering
+% \caption{Clinicopathological characteristics}
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+& \multicolumn{3}{c}{Biopsy-level} & \multicolumn{3}{c}{Patient-level} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Variable & Discovery & Test & \textit{p}-value & Discovery & Test & \textit{p}-value \\
+\midrule
+Age, mean (SD) & 63.9 (10.5) & 69.6 (8.8) & 2.05e-15 & 62.1 (10.9) & 70.9 (9.1) & 2.88e-08 \\
+\addlinespace
+Sex, n (\%) & & & 1.32e-16 & & &4.45e-02 \\
+\qquad Female & 124 (29.4\%)   & 21 (5.9\%) & &31 (24.4\%) &7 (10.9\%)  & \\
+\qquad Male & 298 (70.6\%) &334 (94.1\%) &  & 96 (75.6\%) & 57 (89.1\%) & \\
+\addlinespace
+Flow cytometry, n (\%) & & &2.45e-04& & &8.99e-01 \\
+\qquad Normal & 297 (70.4\%)&291 (82\%) & & 86 (67.7\%) & 42 (65.6\%) & \\
+\qquad Abnormal & 125 (29.6\%) &64 (18\%) &  & 41 (32.3\%) & 22 (34.4\%) & \\
+\addlinespace
+Progression, n (\%) & & & 1.66e-58 & & &2.52e-17\\
+\qquad NCO & 302 (86.5\%) & 48 (13.5\%) & & 104 (81.9\%) & 11 (17.2\%) & \\
+\qquad CO & 120 (28.4\%) & 307 (86.5\%) & &  23 (17.6\%) & 53 (82.8\%) & \\
+\addlinespace
+BE length, mean (SD) & 7.4 (4.1) & -& &     5.8 (3.9) & -  & \\
+\addlinespace
+Follow-up month, mean (SD) & 98.1 (76.6) & 25.8 (70.8) & 3.74e-38 & 113.9 (77.8) & 23.9 (83.5) & 6.46e-11\\
+\addlinespace
+Biopsy per patient, mean (SD) & & & & 3.3 (2.7) & 5.5 (3.5)  &2.20e-05 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.3cm}
+\footnotesize
+\begin{minipage}{16cm}
+NCO: Non-cancer outcome, CO: Cancer outcome, SD: Standard deviation. \textit{p}-value was calculated for sex, flow cytometry and progression with student's t-test, for the rest we used Pearson's chi-squared test.
+\end{minipage}
+\end{table}
+\end{document}

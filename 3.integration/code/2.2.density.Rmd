@@ -1,0 +1,209 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+
+fix_path <- function(path){
+  os_type <- Sys.info()["sysname"]
+  if (os_type == "Windows"){
+    path <- gsub("/rsrch5", "//d1prprsh5ccifs", path)
+  } else{
+    path <- gsub("//d1prprsh5ccifs", "/rsrch5", path)
+    path <- gsub("B:/", "/rsrch5/home/trans_mol_path/cercan/", path)
+  }
+  return(path)
+}
+
+
+```
+
+
+```{r}
+spatial_folder = fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular")
+
+# region_level <- read.csv(file.path(spatial_folder, "merged","collected_files.csv"))
+
+ region_level <- readRDS(file.path(spatial_folder, "merged","region_level_250527.RDS"))
+
+
+# collected_files_cell_attn_cell <- read.csv("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/merged/collected_files_cell_attn_cell.csv")
+
+```
+
+
+
+
+
+```{r}
+calculate_dens <- function(region_level, attn_group) {
+  wsi_level <- region_level %>%
+  mutate(across(starts_with("Num"), ~ replace_na(., 0)))%>%
+    group_by(wsi, Image, flow, progression, pred, dataset) %>%
+    # mutate(Dens_LymphPlasma = Dens_Lymphocyte + Dens_Plasma) %>%
+    # mutate(Dens_Immune = Dens_LymphPlasma + Dens_Plasma + Dens_Eosinophil + Dens_Neutrophil) %>%
+  summarise(across(c(Dens_Epithelial, Dens_Lymphocyte, Dens_Plasma,Dens_LymphoPlasma,Dens_Immune), mean, na.rm = TRUE), .groups = 'drop')%>%
+    group_by(wsi, flow, pred, progression, dataset) %>%
+    summarise(across(c(Dens_Epithelial, Dens_Lymphocyte, Dens_Plasma, Dens_LymphoPlasma, Dens_Immune), mean,na.rm = TRUE), .groups = 'drop') %>%
+    rename_with(~ paste0(., "_", attn_group), starts_with("Dens"))
+
+  return(wsi_level)
+}
+
+
+attn_specific_mean_dens <- function(region_level) {
+
+wsi_level_dens <- calculate_dens(region_level, 2)
+
+wsi_level_dens <- region_level%>%
+  filter(attention_score >= 0.5)%>%
+  calculate_dens(1)%>%
+  left_join(wsi_level_dens,by = c("wsi",  "flow", "pred", "progression", "dataset"))
+
+
+wsi_level_dens <- region_level%>%
+  filter(attention_score < 0.5)%>%
+  calculate_dens(0)%>%
+  left_join(wsi_level_dens,by = c("wsi",  "flow", "pred", "progression", "dataset"))
+
+}
+
+wsi_level_dens <- attn_specific_mean_dens(region_level)
+
+
+```
+
+```{r}
+
+write.csv(wsi_level_dens, file.path(spatial_folder,"calculated","density.csv"), row.names = F)
+```
+
+```{r read.csv}
+
+csv_folder <- "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/"
+
+wsi_level_dens <- read.csv(file.path(spatial_folder,"calculated","density.csv"))
+```
+
+
+```{r plots}
+# wsi_level_dens <- read.csv(file.path(csv_folder, "241219", "density.csv")) %>%
+  # select(-X) %>%
+wsi_level_dens <- wsi_level_dens%>%
+  mutate(across(all_of(c("progression", "flow", "pred", "dataset")), factor))
+
+plots_folder = fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/plot/density/")
+dir.create(file.path(plots_folder,"attn"), recursive = T)
+dir.create(file.path(plots_folder,"pred"))
+```
+
+
+```{r plots}
+analyse_columns <- names(wsi_level_dens)[grepl("^Dens_", names(wsi_level_dens))]
+
+# # Create a directory for plots if it doesn't exist
+# if (!dir.exists(plots_folder)) {
+#   dir.create(plots_folder)
+# }
+
+# progression
+dir.create(file.path(plots_folder,"progression", "intraWsi"), recursive = T)
+for (pred_condition in c(0,1,"all")) {
+  for (col in analyse_columns) {
+    plot <- wsi_level_dens%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . }%>%
+      drop_na(progression)%>%
+      ggboxplot(x = "progression", y = col, fill = "progression") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Density ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"progression",paste0("Density_pred",pred_condition, "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+}
+
+
+# progression
+wsi_level_dens_long <- wsi_level_dens %>%
+      pivot_longer(cols = analyse_columns)
+
+
+unique_col_names <- unique(substring(analyse_columns, 1, nchar(analyse_columns) - 1))
+p_values_list <- list()
+
+calculate_p_values <- function(data, group_col, value_col) {
+  p_values <- data %>%
+    group_by(!!sym(group_col)) %>%
+    summarise(p_value = wilcox.test(!!sym(value_col) ~ name)$p.value)
+  return(p_values)
+}
+
+
+  for (progress_condition in c(0, 1)) {
+  for (unique_col_name in unique_col_names) {
+    filtered_data <- wsi_level_dens_long %>%
+      filter(name == paste0(unique_col_name, "0") | name == paste0(unique_col_name, "1"))%>%
+      { if (pred_condition != "all") filter(., pred == pred_condition) else . } %>%
+      # filter(pred == 1) %>%
+      drop_na(progression)%>%
+      mutate(across(all_of(c("progression", "name")), factor))%>%
+      arrange(wsi)
+
+      # comparisons <- combn(unique(levels(filtered_data$progression)), 2, simplify = FALSE)
+      p_values <- calculate_p_values(filtered_data, "progression", "value")
+
+
+
+      # plot <- ggboxplot(filtered_data, 
+      #             x = "progression", 
+      #             y = "value", 
+      #             fill = "name") + 
+      #   stat_compare_means(method = "wilcox.test", 
+      #                      paired = FALSE,
+      #                      comparisons = unique_col_names) +
+      #   labs(title = paste("Density for", unique_col_name, "with pred condition", pred_condition))
+      
+      p  <- ggboxplot(filtered_data,
+                   x = "progression",
+                   y = "value",
+                   fill = "name") +
+      labs(title = paste("Density for", unique_col_name, "with pred condition", pred_condition)) +
+      stat_compare_means(aes(group = name), label = "p.signif", method = "wilcox.test")
+
+      # Save the plot to the plots folder
+      ggsave(filename = file.path(plots_folder,"progression", "intraWsi",paste0("Density_pred", pred_condition, "_", unique_col_name, ".pdf")), 
+             plot = p, width = 8, height = 6)
+
+  }
+  }
+
+#pred
+dir.create(file.path(plots_folder,"pred"), recursive = T)
+# for (pred_condition in c(0,1,"all")) {
+  for (col in analyse_columns) {
+    plot <- wsi_level_dens%>%
+      # { if (pred_condition != "all") filter(., pred == pred_condition) else . }%>%
+      # drop_na(progression)%>%
+      ggboxplot(x = "pred", y = col, fill = "pred") +
+      stat_compare_means(method = "wilcox.test", paired = FALSE) +
+      labs(title = paste("Density ", col))
+  
+    # Save the plot to the plots folder
+    ggsave(filename = file.path(plots_folder,"pred",paste0("Density", "_",col, ".pdf")), plot = plot, width = 8, height = 6)
+  }
+# }
+
+
+
+```
+
+```{}
+filtered_data %>%
+    group_by(!!sym(group_col)) %>%
+    summarise(p_value = wilcox.test(!!sym(value_col) ~ name)$p.value)
+```
+

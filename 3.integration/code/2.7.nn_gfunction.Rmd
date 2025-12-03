@@ -1,0 +1,289 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(spatstat)
+library(pracma)
+library(dplyr)
+library(tidyr)
+set.seed(42)
+library(future)
+library(furrr)
+fix_path <- function(path){
+  os_type <- Sys.info()["sysname"]
+  if (os_type == "Windows"){
+    path <- gsub("/rsrch5", "//d1prprsh5ccifs", path)
+  } else{
+    path <- gsub("//d1prprsh5ccifs", "/rsrch5", path)
+    path <- gsub("B:/", "/rsrch5/home/trans_mol_path/cercan/", path)
+  }
+  return(path)
+}
+integration_project_path =fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/merged/")
+# ripley
+
+attn_cell <- readRDS(file.path(integration_project_path,"cell_level_250527.RDS"))
+
+
+options(future.globals.maxSize = 2^33)
+plan(multisession, workers = 120)
+# plan(sequential)
+attn_cell <- attn_cell%>%
+  drop_na(attention_score)
+
+attn_cell_dataset <- attn_cell %>%
+  filter(Class %in% c("Lymphocyte", "Plasma")) %>%
+  mutate(Class = "Lymph.Plasma") %>%
+  bind_rows(attn_cell) %>%
+  filter(Class %in% c("Lymphocyte", "OtherImmune", "Plasma")) %>%
+  mutate(Class = "Immune") %>%
+  bind_rows(attn_cell)
+
+temp_folder = "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/intermediate/"
+# saveRDS(ppp_list_0, file.path(temp_folder,"ppp_list_0.rds"))
+# saveRDS(ppp_list_1, file.path(temp_folder,"ppp_list_1.rds"))
+# saveRDS(ppp_list, file.path(temp_folder,"ppp_list.rds"))
+
+
+ppp_list_0 <- readRDS( file.path(temp_folder,"ppp_list_0.rds"))
+ppp_list_1 <- readRDS( file.path(temp_folder,"ppp_list_1.rds"))
+ppp_list <- readRDS( file.path(temp_folder,"ppp_list.rds"))
+
+
+```
+
+
+```{r create ppp functions}
+
+create_window <- function(df) {
+  x_range <- range(df$Centroid.X.um)
+  y_range <- range(df$Centroid.Y.um)
+  owin(xrange = x_range, yrange = y_range)  # Create spatial window
+}
+
+create_ppp_list <- function(attn_cell_dataset, attn = 2) {
+  attn_cell_dataset <- attn_cell_dataset %>%
+    # filter(dataset == !!dataset) %>%
+    {if (attn == 1) filter(., attention_score >= 0.5) 
+     else if (attn == 0) filter(., attention_score < 0.5) 
+     else .}
+  
+  attn_cell_dataset$Class <- as.factor(attn_cell_dataset$Class)
+  ppp_list <- attn_cell_dataset %>%
+    group_by(Image) %>%
+    group_split() %>%
+    future_map(
+      ~ {
+        slide_data <- .x
+        win <- create_window(slide_data)
+        ppp_obj <- ppp(
+          x = slide_data$Centroid.X.um,
+          y = slide_data$Centroid.Y.um,
+          marks = slide_data$Class,
+          window = win,
+          checkdup = FALSE
+        )
+        ppp_obj$wsi <- .x$wsi
+        return(ppp_obj)
+      },
+      .options = furrr_options(seed = TRUE)  # Optional: set seed for reproducibility
+    )
+  
+  return(ppp_list)
+}
+
+
+
+
+```
+
+```{r}
+ppp_list <- create_ppp_list(attn_cell_dataset, 2)
+ppp_list_1 <- create_ppp_list(attn_cell_dataset, 1)
+ppp_list_0 <- create_ppp_list(attn_cell_dataset, 0)
+```
+
+
+
+
+```{r calculate nn functions}
+trapz <- function(x, y) {
+  sum(diff(x) * (y[-length(y)] + y[-1]) / 2)
+  }
+
+summarise_g <- function(g_cross){
+  g_cross$diff <- g_cross$km - g_cross$theo
+  auc_diff <- trapz(g_cross$r, g_cross$diff)
+  
+  g_window <- g_cross[g_cross$r <= 150, ]
+  mean_dev <- mean(g_window$km - g_window$theo, na.rm = TRUE)
+  # median_dev <- median(g_window$km - g_window$theo, na.rm = TRUE)
+  
+  max_dev <- max(g_window$km - g_window$theo, na.rm = TRUE)
+  peak_r <- g_window$r[which.max(g_window$km - g_window$theo)]
+  
+  gcross_summary <- data_frame(auc_diff = auc_diff, 
+                               mean_dev = mean_dev, 
+                               max_dev = max_dev, 
+                               peak_r)
+  return(gcross_summary)
+}
+
+calculate_gcross <- function(ppp_obj, cell_pair) {
+  cell_type1 <- cell_pair[1]
+  cell_type2 <- cell_pair[2]
+  img_name <- ppp_obj$Image
+  if (sum(marks(ppp_obj) == cell_type1) == 0 || sum(marks(ppp_obj) == cell_type2) == 0) {
+    warning(glue::glue("Skipping image {img_name} - missing {cell_type1} or {cell_type2}"))
+    return(NULL)
+  }
+  
+  g_cross <- Gcross(ppp_obj, i = cell_type1, j = cell_type2, correction = "km")
+  # mean_g_cross <- mean(as.numeric(g_cross$rs), na.rm = TRUE) # do it later
+  gcross_summary <- summarise_g(g_cross)%>%
+    rename_with(~ paste(.x, cell_type1, cell_type2,sep = "_"))
+  
+  return(gcross_summary)
+}
+
+cell_pairs_list <- list(
+    c("Epithelial", "Stroma"),
+    c("Epithelial", "Immune"),
+    c("Epithelial", "Lymph.Plasma"),
+    c("Epithelial", "Lymphocyte"),
+    c("Epithelial", "Plasma"),
+    c("Immune", "Stroma"),
+    c("Lymph.Plasma", "Stroma"),
+    c("Lymphocyte", "Stroma"),
+    c("Plasma", "Stroma")
+  )
+
+
+
+process_ppp <- function(ppp_obj,cell_pairs_list,attn_group) {
+  single_wsi_result_list <- lapply(cell_pairs_list, function(cell_pair) {
+    calculate_gcross(ppp_obj, cell_pair)
+    })
+  single_wsi_result <- bind_cols(single_wsi_result_list)
+  if (attn_group !=2){
+    single_wsi_result<-  single_wsi_result%>%
+    rename_with(~ paste0(.x, "_attn",attn_group))
+  single_wsi_result<-  single_wsi_result%>%
+    mutate(wsi = as.character(first(ppp_obj$wsi)))
+    }
+  return(single_wsi_result)
+  }
+
+results_lists <- future_map(ppp_list, ~ process_ppp(.x, cell_pairs_list))
+results <- bind_rows(results_lists)
+
+results_lists <- future_map(ppp_list_0, ~ process_ppp(.x, cell_pairs_list,0))
+results_0 <- bind_rows(results_lists)
+
+results_lists <- future_map(ppp_list_1, ~ process_ppp(.x, cell_pairs_list,1))
+results_1 <- bind_rows(results_lists)
+
+results_merged <- results %>%
+  left_join(y=results_1, by ="wsi")%>%
+  left_join(y=results_0, by ="wsi")%>%
+  mutate(across(everything(), ~ replace_na(., 0)))%>%
+  relocate(wsi, .before = 1)
+```
+
+
+
+
+```{r}
+
+
+
+spatial_folder = fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/")
+
+write.csv(results_merged,file.path(spatial_folder,"calculated","nn_gfunction_wsi.csv"),row.names = F)
+
+```
+
+
+#stop
+
+```{r add clinical}
+# only for once
+
+spatial_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/"
+final_results_nngfunc <- read.csv(paste0(spatial_folder,"tabular/calculated/241219/","nn_gfunction.csv"))
+
+load(paste0(spatial_folder, "tabular/merged/region_level.RData"))
+region_level <- region_level %>%
+  select(-Image) %>%
+    group_by(wsi)%>%
+  summarise(across(everything(), first))
+
+final_results_nngfunc$wsi <- substr(final_results_nngfunc$Image, 1,5)
+
+  final_results_nngfunc_wsi <- final_results_nngfunc%>%
+    select(-Image)%>%
+    group_by(wsi)%>%
+    summarise(across(everything(), mean, na.rm = TRUE))
+  
+  
+
+final_results_nngfunc_wsi <- right_join(region_level[,1:5], final_results_nngfunc_wsi, by = "wsi")
+```
+
+
+
+
+
+# Obsolete
+
+
+
+```{r}
+ppp_list_MDA1 <- create_ppp_list(attn_cell, "MDA1")  # Create point pattern list
+gcross_results <- get_gcross_results(ppp_list_MDA1, attn_cell)  # Compute Gcross results
+
+
+ppp_list_NU_attn1 <- create_ppp_list(attn_cell, "NU", attn = 1)
+ppp_list_MDA1_attn1 <- create_ppp_list(attn_cell, "MDA1", attn = 1)
+ppp_list_MDA2_attn1 <- create_ppp_list(attn_cell, "MDA2", attn = 1)
+
+
+
+output <- get_gcross_results(ppp_list_NU_attn1, attn_cell)
+results_NU <- output$results
+summary_stats_NU_attn1 <- output$summary_stats
+summary_stats_NU_attn1 <- summary_stats_NU_attn1%>%
+  filter(dataset == "NU")
+
+output <- get_gcross_results(ppp_list_MDA1_attn1, attn_cell)
+results_MDA1 <- output$results
+summary_stats_MDA1_attn1 <- output$summary_stats
+summary_stats_MDA1_attn1 <- summary_stats_MDA1_attn1%>%
+  filter(dataset == "MDA1")
+
+output <- get_gcross_results(ppp_list_MDA2_attn1, attn_cell)
+results_MDA2 <- output$results
+summary_stats_MDA2_attn1 <- output$summary_stats
+summary_stats_MDA2_attn1 <- summary_stats_MDA2_attn1%>%
+  filter(dataset == "MDA2")
+
+
+
+summary_stats_attn1 <- rbind(summary_stats_NU_attn1, summary_stats_MDA1_attn1, summary_stats_MDA2_attn1)
+results_df_attn1 <- rbind(results_NU, results_MDA1, results_MDA2)
+
+integration_calculated_path = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/"
+
+write.csv(summary_stats_attn1, paste0(integration_calculated_path, "gfunction_summary_attn1.csv"), row.names = F)
+write.csv(results_df_attn1, paste0(integration_calculated_path, "gfunction_results_attn1.csv"), row.names = F)
+
+
+
+```
+
+
+

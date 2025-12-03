@@ -1,0 +1,1045 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(dplyr)
+library(abdiv)
+library(ggplot2)
+library(tidyr)
+library(ggpubr)
+
+fix_path <- function(path){
+  os_type <- Sys.info()["sysname"]
+  if (os_type == "Windows"){
+    path <- gsub("/rsrch5", "//d1prprsh5ccifs", path)
+  } else{
+    path <- gsub("//d1prprsh5ccifs", "/rsrch5", path)
+    path <- gsub("B:/", "/rsrch5/home/trans_mol_path/cercan/", path)
+  }
+  return(path)
+}
+
+
+
+spatial_folder = fix_path("B:/BE_master/3.integration/integration_project/spatial_analysis/")
+integration_project_path =file.path(spatial_folder,"tabular/merged/")
+
+region_level <- readRDS(file.path(integration_project_path,"region_level_250527.RDS"))
+
+```
+
+
+```{}
+region_level_edit <- region_level %>%
+  select(-starts_with("Dens.")) %>%
+  select(-matches("Num.*_area")) %>%
+  mutate(Num.LymphoPlasma = Num.Lymphocyte + Num.Plasma,
+         Num.Immune = Num.Lymphocyte + Num.Plasma + Num.Neutrophil + Num.Eosinophil)
+
+
+
+  
+# for(location in c("stroma", "epithelium")){
+  # for(cell_type in c("Lymphocyte", "Plasma","LymphoPlasma", "Eosinophil", "Neutrophil")){
+    immune_classes <- c("Num.Immune", "Num.LymphoPlasma", 
+                    "Num.Lymphocyte", "Num.Plasma")
+
+ 
+    # target_colname=paste0("Dens.",cell_type,"_stroma")
+    # cell_colname = paste0("Num.",cell_type)
+    
+    region_level_edit <- region_level_edit%>%
+      mutate(across(all_of(immune_classes),
+                ~ . / Area.um.2_stroma_area,
+                .names = "Dens_{.col}"))%>%
+      rename_with(~ sub("^Dens_Num.", "Dens_", .), starts_with("Dens_Num"))
+
+
+    
+             
+
+region_level_edit <- region_level_edit%>%
+      mutate(Dens.Epithelial = Num.Epithelial / Area.um.2_epithelium_area)
+```
+
+
+```{r}
+
+immune_classes <- c("Num.Immune", "Num.Lymphocyte", 
+                    "Num.Plasma", "Num.LymphoPlasma")
+
+# Create a new data frame with Morisita calculations
+morisita_data1 <- region_level %>%
+  filter(attention_score >= 0.5) %>%
+  group_by(wsi, progression, flow, pred, dataset) %>%
+  summarise(across(all_of(immune_classes), 
+                   ~ horn_morisita(Num.Epithelial, .), 
+                   .names = "Morisita_{col}_attn1"), 
+            .groups = 'drop')%>%
+  rename_with(~ sub("^Morisita_Num.", "Morisita_", .), starts_with("Morisita_Num"))
+
+
+morisita_data2 <- region_level %>%
+  # filter(attention_score >= 0.5) %>%
+  group_by(wsi, progression, flow, pred, dataset) %>%
+  summarise(across(all_of(immune_classes), 
+                   ~ horn_morisita(Num.Epithelial, .), 
+                   .names = "Morisita_{col}_attn2"), 
+            .groups = 'drop')%>%
+  rename_with(~ sub("^Morisita_Num.", "Morisita_", .), starts_with("Morisita_Num"))
+
+
+morisita_data0 <- region_level %>%
+  filter(attention_score < 0.5) %>%
+  group_by(wsi, progression, flow, pred, dataset) %>%
+  summarise(across(all_of(immune_classes), 
+                   ~ horn_morisita(Num.Epithelial, .), 
+                   .names = "Morisita_{col}_attn0"), 
+            .groups = 'drop')%>%
+  rename_with(~ sub("^Morisita_Num.", "Morisita_", .), starts_with("Morisita_Num"))
+
+morisita_data <- left_join(morisita_data1,morisita_data0,morisita_data2, by=c("wsi", "progression", "flow", "pred", "dataset"))
+remove(morisita_data1,morisita_data0,morisita_data2)
+
+
+write.csv(morisita_data, file.path(spatial_folder,"tabular/calculated/morisita.csv"), row.names = FALSE)
+```
+
+```{r}
+morisita_data <- morisita_data%>%
+  mutate(across(all_of(c("progression", "flow", "pred","dataset")),
+                ~ factor(.)))
+
+morisita_column_set <- colnames(morisita_data)[6:length(morisita_data)]
+
+
+symnum.args <- list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), symbols = c("****", "***", "**", "*", "ns"))
+                     
+```
+
+
+
+```{r plots}
+#pred 1, co 0vs1 (attn 0,1)
+
+plot_folder = paste0(spatial_folder,"plot/morisita/COvsNCO/")
+dir.create(plot_folder, recursive = T)
+
+
+morisita_data %>%
+  drop_na(progression) %>%
+  filter(pred == 1) %>%
+  select(progression, starts_with("Morisita")) %>%  # Select progression and Morisita columns
+  pivot_longer(cols = starts_with("Morisita"), names_to = "Morisita_Type", values_to = "Value") %>%  # Reshape data
+  group_by(Morisita_Type) %>%  # Group by Morisita type
+  group_map(~ {
+  
+    p <- ggplot(.x, aes(x = progression, y = Value, color = progression)) +
+      geom_boxplot() +
+      stat_compare_means(method = "wilcox.test", label.x.npc = "centre", symnum.args = symnum.args) +
+      theme_light() +
+      labs(title = .y, y = "Morisita")  
+    
+    ggsave(paste0(plot_folder,.y,"_absolute_wholedataset",".pdf"), plot = p, width = 8, height = 6)
+    return(p)
+  }) -> plots
+
+# To display the plots
+for (plot in plots) {
+  print(plot)
+}
+
+
+morisita_data %>%
+  drop_na(progression) %>%
+  filter(pred == 1) %>%
+  select(progression, dataset, starts_with("Morisita")) %>%  # Select progression and Morisita columns
+  pivot_longer(cols = starts_with("Morisita"), names_to = "Morisita_Type", values_to = "Value") %>%  # Reshape data
+  group_by(Morisita_Type,dataset) %>%  # Group by Morisita type
+  group_map(~ {
+  
+    p <- ggplot(.x, aes(x = progression, y = Value, color = progression)) +
+      geom_boxplot() +
+      stat_compare_means(method = "wilcox.test", label.x.npc = "centre", symnum.args = symnum.args) +
+      theme_light() +
+      labs(title = paste0(.y$Morisita_Type, "_", .y$dataset), y = "Morisita")
+    
+    ggsave(paste0(plot_folder,.y$Morisita_Type,"_absolute_",.y$dataset,".pdf"), plot = p, width = 8, height = 6)
+    return(p)
+  }) -> plots
+
+# To display the plots
+for (plot in plots) {
+  print(plot)
+}
+```
+
+
+
+```{r pred1_attn0vs1}
+
+plot_folder = paste0(spatial_folder,"plot/morisita/attn0vs1/")
+dir.create(plot_folder, recursive = T)
+
+morisita_data %>%
+  select(pred, ends_with("_attn0"), ends_with("_attn1")) %>%  # Select relevant columns
+  pivot_longer(cols = -pred, names_to = c("_", "cell","attn"), names_sep = "_",values_to = "Morisita")%>%
+  mutate(across(all_of(c("cell", "attn")),
+                ~ factor(.)))%>%
+  group_by(cell,pred)%>%
+  group_map(~ {
+    p <- ggplot(.x,aes(x=attn, y=Morisita, color = attn))+
+      geom_boxplot() +
+      stat_compare_means(method = "wilcox.test", label.x.npc = "centre", symnum.args = symnum.args, paired = TRUE) +
+      theme_light() +
+      labs(title = paste0(.y$cell, "_", .y$pred), y = "Morisita")
+    
+    ggsave(paste0(plot_folder,.y$cell,"_absolute_",.y$pred,".pdf"), plot = p, width = 8, height = 6)
+    return(p)
+    })
+
+# To display the plots
+for (plot in plots) {
+  print(plot)
+}
+
+```
+
+
+```{r plots  pred 0 vs 1 ( attn1, 2)}
+
+
+plot_folder = paste0(spatial_folder,"plot/morisita/pred0vs1/")
+dir.create(plot_folder, recursive = T)
+
+
+
+morisita_data %>%
+  # drop_na(progression) %>%
+  # filter(pred == 1) %>%
+  select(pred, starts_with("Morisita")) %>%  # Select progression and Morisita columns
+  pivot_longer(cols = starts_with("Morisita"), names_to = "Morisita_Type", values_to = "Value") %>%  # Reshape data
+  group_by(Morisita_Type) %>%  # Group by Morisita type
+  group_map(~ {
+  
+    p <- ggplot(.x, aes(x = pred, y = Value, color = pred)) +
+      geom_boxplot() +
+      stat_compare_means(method = "wilcox.test", label.x.npc = "centre", symnum.args = symnum.args) +
+      theme_light() +
+      labs(title = .y, y = "Morisita")  
+    
+    ggsave(paste0(plot_folder,.y,"_absolute_wholedataset",".pdf"), plot = p, width = 8, height = 6)
+    return(p)
+  }) -> plots
+
+# To display the plots
+for (plot in plots) {
+  print(plot)
+}
+
+
+```
+
+
+
+
+
+
+# obsolete
+```{r morisita}
+
+morisita_NU_csv_path = paste(tsv_folder_NU,"morisita_NU.csv", sep="/")
+if ( file.exists(morisita_NU_csv_path)){
+  collected_files_NU <- read.csv(morisita_NU_csv_path)
+}else{
+collected_files_NU_rectangle_morisita <- collected_files_NU_rectangle %>%
+  filter(attention_score >= 0.5) %>%
+  group_by(wsi, progression, Image, flow, pred) %>%
+  summarise(Morisita = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte), method = "morisita"), .groups = 'drop')
+write_csv(collected_files_NU_rectangle_morisita, file = morisita_NU_csv_path)
+}
+
+
+morisita_MDA_csv_path = paste(tsv_folder_MDA1,"morisita_MDA.csv", sep="/")
+if ( file.exists(morisita_MDA_csv_path)){
+  collected_files_MDA <- read.csv(morisita_MDA_csv_path)
+}else{
+collected_files_MDA_rectangle_morisita <- collected_files_MDA_rectangle %>%
+  filter(attention_score >= 0.5) %>%
+  group_by(wsi, progression, Image, flow, pred) %>%
+  summarise(Morisita = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte), method = "morisita"), .groups = 'drop')
+
+
+    
+write_csv(collected_files_MDA_rectangle_morisita, file = morisita_MDA_csv_path)
+}
+```
+
+```{r neigbour morisita}
+
+find_neighboring_regions <- function(df, tile_size=112) {
+  filtered_df <- df%>%
+  filter(attention_score >= 0.5 )
+  
+  x = filtered_df$Centroid.X.px
+  y = filtered_df$Centroid.Y.px
+  
+  neighbors <- data.frame(Centroid.X.px = numeric(), Centroid.Y.px = numeric())
+
+
+  for (i in -1:1) {
+    for (j in -1:1) {
+      # if (i == 0 && j == 0) {
+      #   next
+      # }
+
+      x_neighbor <- x + i * tile_size
+      y_neighbor <- y + j * tile_size
+
+      neighbor <- data.frame(Centroid.X.px = x_neighbor, Centroid.Y.px = y_neighbor)
+
+      neighbors <- rbind(neighbors, neighbor)
+    }
+  }
+  neighbors <- distinct(neighbors)
+  neighbors$neighbor_attn <- 1
+  df <- left_join(df, neighbors, by = c("Centroid.X.px", "Centroid.Y.px")) %>%
+  mutate(neighbor_attn = if_else(is.na(neighbor_attn), 0, neighbor_attn))
+
+
+  return(df)
+}
+
+
+find_and_summarize_neighboring_regions <- function(df, tile_size = 112) {
+  # Filter the dataframe based on attention_score
+  filtered_df <- df %>%
+    filter(attention_score < 0.5 & neighbor_attn == 0)
+  
+  # Generate all neighbor offsets for a 3x3 grid (including self)
+  neighbor_offsets <- expand.grid(i = -1:1, j = -1:1) %>%
+    mutate(neighbor_dx = i * tile_size, neighbor_dy = j * tile_size) %>%
+    select(neighbor_dx, neighbor_dy)
+
+  # Join filtered_df with neighbor_offsets to generate all neighbors for each region
+  neighbors <- filtered_df %>%
+    crossing(neighbor_offsets) %>%
+    mutate(
+      Neighbor.X.px = Centroid.X.px + neighbor_dx,
+      Neighbor.Y.px = Centroid.Y.px + neighbor_dy
+    ) %>%
+    select(Image, Neighbor.X.px, Neighbor.Y.px)
+  
+  # Fetch remaining columns from the main dataframe using a join to complete neighbor information
+  neighbor_data <- neighbors %>%
+    left_join(filtered_df, by = c("Image" = "Image", "Neighbor.X.px" = "Centroid.X.px", "Neighbor.Y.px" = "Centroid.Y.px")) %>%
+    filter(neighbor_attn == 0)
+
+  # Summarize neighboring regions by image
+  summarized_df <- neighbor_data %>%
+    group_by(Image) %>%
+    summarise(across(starts_with("Num."), sum, na.rm = TRUE), .groups = 'drop') %>%
+    left_join(df %>% select(Image, flow, pred, progression), by = "Image")
+  
+  summarized_df$Image <- as.factor(summarized_df$Image)
+  df$Num.Lymphocyte.Plasma <- df$Num.Lymphocyte + df$Num.Plasma
+
+  summarized_df <- df %>%
+    group_by(Image, flow, pred,progression) %>%
+    filter(Num.Epithelial > 0) %>%
+    filter(Num.Plasma > 0 | Num.Lymphocyte > 0) %>%
+    summarise(
+      Morisita_lymph = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte), method = "morisita"),
+      Morisita_detection = niche.overlap(cbind(Num.Epithelial, Num.Detections), method = "morisita"),
+      Morisita_plasma = niche.overlap(cbind(Num.Epithelial, Num.Plasma), method = "morisita"),
+      Morisita_lymph_plasma = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte.Plasma), method = "morisita"),
+      .groups = 'drop'
+    )
+
+  return(summarized_df)
+}
+
+
+# collected_files_NU_rectangle <- find_neighboring_regions(collected_files_NU_rectangle )
+morisita_wNeigbors_NU_csv_path = paste(tsv_folder_NU,"morisita_wNeigbors_NU.csv", sep="/")
+if ( file.exists(morisita_wNeigbors_NU_csv_path)){
+  rectangle_wNeigbors_morisita_NU <- read.csv(morisita_wNeigbors_NU_csv_path)
+}else{
+rectangle_wNeigbors_morisita_NU <- find_and_summarize_neighboring_regions(collected_files_NU_rectangle)
+
+rectangle_wNeigbors_morisita_NU <- rectangle_wNeigbors_morisita_NU%>%
+  mutate(progression = as.numeric(as.character(progression)))%>%
+  mutate(progression = as.factor(progression))
+
+write_csv(rectangle_wNeigbors_morisita_NU, file = morisita_wNeigbors_NU_csv_path)
+}
+
+
+collected_files_MDA_rectangle <- find_neighboring_regions(collected_files_MDA_rectangle )
+morisita_wNeigbors_MDA_csv_path = paste(tsv_folder_MDA1,"morisita_wNeigbors_MDA.csv", sep="/")
+if ( file.exists(morisita_wNeigbors_MDA_csv_path)){
+  rectangle_wNeigbors_morisita_MDA <- read.csv(morisita_wNeigbors_MDA_csv_path)
+}else{
+rectangle_wNeigbors_morisita_MDA <- find_and_summarize_neighboring_regions(collected_files_MDA_rectangle)
+
+rectangle_wNeigbors_morisita_MDA <- rectangle_wNeigbors_morisita_MDA%>%
+  mutate(progression = as.numeric(as.character(progression)))%>%
+  mutate(progression = as.factor(progression))
+
+write_csv(rectangle_wNeigbors_morisita_MDA, file = morisita_wNeigbors_MDA_csv_path)
+}
+
+```
+
+```{r histogram NU}
+ggplot(collected_files_NU_rectangle, aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+
+
+collected_files_NU_rectangle %>%
+  filter(flow == "1") %>%
+ggplot(aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+
+collected_files_NU_rectangle %>%
+  filter(flow == "1" & pred =="1") %>%
+ggplot(aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+```
+
+
+```{r plasma box}
+
+collected_files_NU_rectangle%>%
+  filter(neighbor_attn == 1 | attention_score >= 0.5 )%>%
+  filter(Num.Lymphocyte >0 & Num.Epithelial >0) %>%
+  ggplot(aes(x = as.factor(progression), y = Num.Lymphocyte, fill = as.factor(progression))) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  geom_violin(trim = FALSE)
+
+
+collected_files_NU_rectangle%>%
+  filter( pred =="1") %>%
+  filter(neighbor_attn == 1 | attention_score >= 0.5 )%>%
+  filter(Num.Lymphocyte >0 & Num.Epithelial >0) %>%
+  ggplot(aes(x = as.factor(progression), y = Num.Lymphocyte, fill = as.factor(progression))) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  geom_violin(trim = FALSE)
+
+
+collected_files_NU_rectangle%>%
+  filter( pred =="1") %>%
+  filter(neighbor_attn == 1 | attention_score >= 0.5 )%>%
+  filter(Num.Plasma >0 & Num.Epithelial >0) %>%
+  ggplot(aes(x = as.factor(progression), y = Num.Plasma, fill = as.factor(progression))) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  geom_violin()
+
+collected_files_NU_rectangle%>%
+  filter(neighbor_attn == 1 | attention_score >= 0.5 )%>%
+  filter(Num.Plasma >0 & Num.Epithelial >0) %>%
+  ggplot(aes(x = as.factor(progression), y = Num.Plasma, fill = as.factor(progression))) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  geom_violin(trim = FALSE)
+```
+
+
+
+
+```{r flow1}
+
+ggplot(collected_files_NU_rectangle, aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+
+collected_files_NU_rectangle %>%
+  filter(flow == "1" ) %>%
+  ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+  
+  
+  
+  collected_files_NU_rectangle %>%
+  filter(flow == "1" & pred =="1") %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+  
+  collected_files_NU_rectangle %>%
+  filter( pred =="1") %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+  
+```
+
+```{r }
+
+collected_files_NU_rectangle %>%
+  filter(attention_score >= 0.5 ) %>%
+  ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+
+collected_files_NU_rectangle %>%
+  filter(flow == "1" &attention_score >= 0.5 ) %>%
+  ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+  
+  
+  
+  collected_files_NU_rectangle %>%
+  filter(flow == "1" & pred =="1"&attention_score >= 0.5) %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+    
+  collected_files_NU_rectangle %>%
+  filter( pred =="1"&attention_score >= 0.5) %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Lymphocyte), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+```
+
+```{r plasma ~ attn}
+
+collected_files_NU_rectangle %>%
+  filter(attention_score >= 0.5 ) %>%
+  ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Plasma), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+
+collected_files_NU_rectangle %>%
+  filter(flow == "1" &attention_score >= 0.5 ) %>%
+  ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Plasma), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+  
+  
+  
+  collected_files_NU_rectangle %>%
+  filter(flow == "1" & pred =="1"&attention_score >= 0.5) %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Plasma), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+
+    
+  collected_files_NU_rectangle %>%
+  filter( pred =="1"&attention_score >= 0.5) %>%
+    ggplot( aes(x = as.factor(progression), y = attention_score, fill = as.factor(progression))) +
+  geom_violin(aes(scale = Num.Plasma), adjust = 1.5, alpha = 0.7) +
+  stat_summary(fun = median, geom = "crossbar", width = 0.25, color = "black") +
+  labs(x = "Progression", y = "Attention Score", fill = "Progression") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif",  position = position_nudge(x = 0.5))+
+  theme_minimal()
+```
+
+```{r plot_function}
+plot_function <- function(df, lastname = NULL, aneuploid_filter = NULL , collumn = "Morisita_lymph"){
+  if (!is.null(lastname)){
+    df <- df %>%
+  filter(endsWith(as.character(Image), lastname)) #"ROI0.tif"
+  }
+  
+  if (!is.null(aneuploid_filter)){
+    df <- df %>%
+  filter(!!sym(aneuploid_filter) == 1) #"ROI0.tif"
+  } else {
+    aneuploid_filter <- "whole dataset"
+  }
+  
+  plot <-df%>%
+    drop_na(progression)%>%
+ggplot( aes(x = progression, y = !!sym(collumn), fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5)) +  # Add p-value from +
+  ggtitle(paste(aneuploid_filter, collumn,lastname, sep= " "))
+print(plot)
+}
+```
+
+
+```{r}
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_NU , lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+
+
+```{r}
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_NU , aneuploid_filter = "flow", lastname = lastname, collumn = column)
+  }
+}
+```
+
+
+```{r}
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_NU , aneuploid_filter = "pred", lastname = lastname, collumn = column)
+  }
+}
+```
+
+
+
+
+
+```{r}
+ggplot(collected_files_NU_rectangle_morisita, aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+collected_files_NU_rectangle_morisita %>%
+  filter(flow == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+collected_files_NU_rectangle_morisita %>%
+  filter(pred == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+```
+
+
+
+```{r}
+collected_files_NU_rectangle$wsi <- as.factor(substr(collected_files_NU_rectangle$Image, 1, 5))
+
+collected_files_NU_rectangle_neigbour_morisita <- collected_files_NU_rectangle %>%
+  filter(neighbor_attn == 1) %>%
+  group_by(wsi, progression, Image, flow, pred) %>%
+  summarise(Morisita = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte), method = "morisita"), .groups = 'drop')
+```
+
+```{r}
+ggplot(collected_files_NU_rectangle_neigbour_morisita, aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+collected_files_NU_rectangle_neigbour_morisita %>%
+  filter(flow == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+collected_files_NU_rectangle_neigbour_morisita %>%
+  filter(pred == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+```
+
+```{r}
+collected_files_NU_rectangle_neigbour_morisita$Image <- as.character(collected_files_NU_rectangle_neigbour_morisita$Image)
+collected_files_NU_rectangle_neigbour_morisita%>%
+  filter(endsWith(Image, "ROI0.tif")) %>%
+  ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+    geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+    stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+    labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+    theme_minimal() +
+    stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+collected_files_NU_rectangle_neigbour_morisita %>%
+  filter(endsWith(Image, "ROI0.tif")) %>%
+  filter(flow == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+collected_files_NU_rectangle_neigbour_morisita %>%
+  filter(endsWith(Image, "ROI0.tif")) %>%
+  filter(pred == 1)%>%
+ggplot( aes(x = progression, y = Morisita, fill = as.factor(progression))) +
+  geom_violin(trim = FALSE) +  # Use trim = FALSE to show the full distribution
+  stat_summary(fun = median, geom = "crossbar", width = 0.5, color = "black", size = 0.5, aes(group = progression)) +  # Add median bar
+  labs(x = "Progression", y = "Morisita Index", fill = "Progression") +
+  theme_minimal() +
+  stat_compare_means(method = "t.test", label = "p.signif",  position = position_nudge(x = 0.5))  # Add p-value from
+
+
+```
+
+
+
+```{r}
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_moriita , lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r}
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_moriita , lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r}
+
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_moriita , aneuploid_filter = "flow", lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r}
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_moriita , aneuploid_filter = "pred", lastname = lastname, collumn = column)
+  }
+}
+```
+
+```{r}
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_moriita , aneuploid_filter = "pred", lastname = lastname, collumn = column)
+  }
+}
+```
+
+```{r logistic regression}
+set.seed(1)
+
+model <- NULL
+  model <- rectangle_wNeigbors_moriita %>%
+  filter(pred == 1)%>%
+glm(progression~Morisita_plasma, family="binomial", data=.)
+summary(model)
+
+
+```
+
+```{r}
+caret::varImp(model)
+```
+
+```{r histogram MDA}
+collected_files_MDA_rectangle %>%
+  drop_na(progression)%>%
+ggplot( aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+
+
+collected_files_MDA_rectangle %>%
+  drop_na(progression)%>%
+  filter(flow == "1") %>%
+ggplot(aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+
+collected_files_MDA_rectangle %>%
+  drop_na(progression)%>%
+  filter(flow == "1" & pred =="1") %>%
+ggplot(aes(x = attention_score, weight = Num.Lymphocyte, color = progression)) +
+  geom_histogram(binwidth = 0.05, position = "identity", alpha=0.5)  +
+  geom_density(aes(y =  ..count..*0.15), alpha = 0.07)+
+  labs(x = "Attention Score", y = "Total Cell Count", fill = "Progression", color = "Progression") +
+  theme_minimal()
+```
+
+```{r mda morisita whole}
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_MDA , lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r mda flow morisita}
+
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_MDA , aneuploid_filter = "flow", lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r merged morisita pred}
+
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function(rectangle_wNeigbors_morisita_MDA , aneuploid_filter = "pred", lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r}
+
+rectangle_wNeigbors_morisita_merged <- rbind(rectangle_wNeigbors_morisita_MDA, rectangle_wNeigbors_morisita_NU)
+
+
+for (lastname in c("NULL", "ROI0.tif", "ROI1.tif")){
+  if(lastname == "NULL"){
+    lastname <- NULL
+  }
+  for (column in c("Morisita_lymph", "Morisita_plasma", "Morisita_lymph_plasma", "Morisita_detection")){
+    plot_function( rectangle_wNeigbors_morisita_merged, aneuploid_filter = "pred", lastname = lastname, collumn = column)
+  }
+}
+
+```
+
+```{r}
+set.seed(1)
+
+model <- NULL
+  model <- rectangle_wNeigbors_morisita_merged %>%
+  filter(pred == 1)%>%
+glm(progression~Morisita_plasma+Morisita_lymph+ Morisita_lymph_plasma +Morisita_detection, family="binomial", data=.)
+summary(model)
+```
+
+
+```{r ROC}
+
+roc_curve <- roc(predictions_test$Y, predictions_test$p_1)
+ggroc(roc_curve, colour = 'steelblue', size = 2) +
+  theme_minimal() +
+  annotate("text", x = 0.7, y = 0.3, label = paste("AUC =", round(auc(roc_curve), 2)), color = "black")
+```
+
+```{r diploid neigbour morisita}
+
+diploid_find_and_summarize_neighboring_regions <- function(df, tile_size = 112) {
+  # Filter the dataframe based on attention_score
+  filtered_df <- df %>%
+    filter(attention_score < 0.5 & neighbor_attn == 0)
+  
+  # Generate all neighbor offsets for a 3x3 grid (including self)
+  neighbor_offsets <- expand.grid(i = -1:1, j = -1:1) %>%
+    mutate(neighbor_dx = i * tile_size, neighbor_dy = j * tile_size) %>%
+    select(neighbor_dx, neighbor_dy)
+
+  # Join filtered_df with neighbor_offsets to generate all neighbors for each region
+  neighbors <- filtered_df %>%
+    crossing(neighbor_offsets) %>%
+    mutate(
+      Neighbor.X.px = Centroid.X.px + neighbor_dx,
+      Neighbor.Y.px = Centroid.Y.px + neighbor_dy
+    ) %>%
+    select(Image, Neighbor.X.px, Neighbor.Y.px)
+  
+  # Fetch remaining columns from the main dataframe using a join to complete neighbor information
+  neighbor_data <- neighbors %>%
+    left_join(filtered_df, by = c("Image" = "Image", "Neighbor.X.px" = "Centroid.X.px", "Neighbor.Y.px" = "Centroid.Y.px")) %>%
+    filter(neighbor_attn == 0)
+
+  # Summarize neighboring regions by image
+  summarized_df <- neighbor_data %>%
+    group_by(Image) %>%
+    summarise(across(starts_with("Num."), sum, na.rm = TRUE), .groups = 'drop') %>%
+    left_join(df %>% select(Image, flow, pred, progression), by = "Image")
+  
+  # Calculate Morisita indices (adjusted to new summarized_df)
+  df <- df %>%
+    mutate(Num.Lymphocyte.Plasma = Num.Lymphocyte + Num.Plasma)
+  
+  morisita_df <- df %>%
+    group_by(Image, flow, pred, progression) %>%
+    filter(Num.Epithelial > 0) %>%
+    filter(Num.Plasma > 0 | Num.Lymphocyte > 0) %>%
+    summarise(
+      diploid_Morisita_lymph = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte), method = "morisita"),
+      diploid_Morisita_detection = niche.overlap(cbind(Num.Epithelial, Num.Detections), method = "morisita"),
+      diploid_Morisita_plasma = niche.overlap(cbind(Num.Epithelial, Num.Plasma), method = "morisita"),
+      diploid_Morisita_lymph_plasma = niche.overlap(cbind(Num.Epithelial, Num.Lymphocyte.Plasma), method = "morisita"),
+      .groups = 'drop'
+    )
+
+  return(morisita_df)
+}
+
+
+
+```
+
+
+```{r morisita for diploid regions}
+
+
+rectangle_wNeigbors_morisita_NU_diploid <- diploid_find_and_summarize_neighboring_regions(collected_files_NU_rectangle)
+rectangle_wNeigbors_morisita_NU_whole <- left_join(rectangle_wNeigbors_morisita_NU, rectangle_wNeigbors_morisita_NU_diploid, by = c("Image", "flow", "pred", "progression"))
+```
+
+
+```{r plot diploid }
+
+rectangle_wNeigbors_morisita_NU_whole %>%
+  filter(pred == 1)%>%
+  reshape2::melt(id=1:4)%>%
+  filter(str_ends(variable, "lymph"))%>%
+  mutate(variable = as.factor(variable))%>%
+  mutate(progression = as.factor(progression))%>%
+  ggplot( aes(x = progression,fill = variable, y = value)) +
+    geom_boxplot() +
+    # geom_jitter(width = 0.1, position = position_jitter(0.1)) +
+    # geom_line(aes(group = 1:n()), position = position_jitter(0.1)) +
+    theme_minimal()
+
+rectangle_wNeigbors_morisita_NU_whole %>%
+  filter(pred == 1)%>%
+  reshape2::melt(id=1:4)%>%
+  filter(str_ends(variable, "Morisita_plasma"))%>%
+  mutate(variable = as.factor(variable))%>%
+  mutate(progression = as.factor(progression))%>%
+  mutate(Image = as.factor(Image))%>%
+  ggplot( aes(x = progression,fill = variable, y = value)) +
+    geom_boxplot() +
+    # geom_jitter() +
+    # geom_line(aes(group=Image)) +
+    theme_minimal()
+
+
+
+```

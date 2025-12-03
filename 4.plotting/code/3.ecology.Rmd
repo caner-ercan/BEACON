@@ -1,0 +1,747 @@
+
+```{r message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(broom)
+library(ggpubr)
+```
+
+
+
+```{r}
+csv_folder <- "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/"
+
+merged_df <- readRDS(file.path(csv_folder,"merged_ecology_250812_wNuc.RDS"))
+output_dir = "/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/2.4.ecology/compare_metrics"
+
+merged_df <- merged_df %>%
+  rename_with(~ case_when(
+    # Handle .x suffix (attn2)
+    grepl("^positive_Ripley", .x) & grepl("\\.x$", .x) ~ 
+      sub("^positive_", "", sub("_AUC\\.x$", "_positive_AUC_attn2", .x)),
+    
+    # Handle .y suffix (attn0)  
+    grepl("^positive_Ripley", .x) & grepl("\\.y$", .x) ~ 
+      sub("^positive_", "", sub("_AUC\\.y$", "_positive_AUC_attn0", .x)),
+    
+    # Handle no suffix (attn1) - assuming these are the base columns
+    grepl("^positive_Ripley", .x) & !grepl("\\.[xy]$", .x) ~ 
+      sub("^positive_", "", sub("_AUC$", "_positive_AUC_attn1", .x)),
+    
+    TRUE ~ .x
+  ))%>%
+  relocate(progression,flow,pred,dataset, .after = wsi)%>%
+  rename_with(
+    ~ ifelse(!grepl("[0-9]$", .x), paste0(.x, "_attn2"), .x),
+    .cols = 6:ncol(.)
+  )%>%
+  rename_with(~ gsub("_([0-9])$", "_attn\\1", .x))
+
+
+
+  
+
+
+```
+
+
+```{r plot_n_save}
+plot_n_save <- function(plot_data, output_dir, x_lab=c("Low","High"), x_title = "Attention Region", base_name, p_value, test_type){
+  
+      
+      stat_test <- data.frame(
+        group1 = x_lab[1],
+        group2 = x_lab[2], 
+        p = as.character(format(p_value, scientific = TRUE, digits = 2)),
+        y.position = max(plot_data$value, na.rm = TRUE) * 1.1,  # Position above the highest point
+        test_name = test_type,  # Add test name to the data frame
+        p.signif = case_when(
+          p_value < 0.001 ~ "***",
+          p_value < 0.01 ~ "**", 
+          p_value < 0.05 ~ "*",
+          TRUE ~ "ns"
+        )
+      )
+      
+      
+      # Create violin + box plot
+      p <- ggplot(plot_data, aes(x = x_category, y = value, fill =x_category)) +
+        geom_violin(alpha = 0.7, trim = FALSE) +
+        geom_boxplot(width = 0.2, alpha = 0.8, outlier.shape = NA) +
+        geom_point(position = position_jitter(width = 0.1), alpha = 0.6) +
+        scale_fill_manual(values = setNames(c("#4575b4", "#fc8d59"), x_lab)) +
+        stat_pvalue_manual(
+          stat_test, 
+          label = "{test_name}: p = {p}",  # Include test name and p-value
+          tip.length = 0.02,
+          bracket.size = 0.6,
+          size = 3.5,
+          xmin = "group1", 
+          xmax = "group2",
+        inherit.aes = F
+        ) +
+        labs(
+          title = base_name,
+          # subtitle = paste0("p-value: ", sprintf("%.4f", p_value), 
+          #                  " (", test_type, ")"),
+          x = x_title,
+          y = "Value"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(size = 14, face = "bold"),
+          plot.subtitle = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          axis.text = element_text(size = 10),
+          legend.position = "none",
+          panel.grid.minor = element_blank()
+        )
+      
+      # Save plot
+      plot_filename <- file.path(output_dir, paste0(base_name, ".pdf"))
+      ggsave(plot_filename, p, width = 10, height = 6, dpi = 300, bg = "white")
+      
+}
+```
+
+
+```{r analyze_attention_pairs}
+analyze_attention_pairs <- function(data, p_threshold = 0.05, output_dir = "plots") {
+  
+  # Create output directory if it doesn't exist
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Get column names
+  all_cols <- names(data)
+  
+  # Find columns ending with attn0 and attn1
+  attn0_cols <- grep("attn0$", all_cols, value = TRUE)
+  attn1_cols <- grep("attn1$", all_cols, value = TRUE)
+  
+  # Create pairs by matching base names
+  base_names_0 <- gsub("attn0$", "", attn0_cols)
+  base_names_1 <- gsub("attn1$", "", attn1_cols)
+  
+  # Find common base names (metrics that have both attn0 and attn1)
+  common_bases <- intersect(base_names_0, base_names_1)
+  
+  if (length(common_bases) == 0) {
+    stop("No matching attention pairs found. Check column naming convention.")
+  }
+  
+  cat("Found", length(common_bases), "attention pairs to analyze\n")
+  
+  # Initialize results storage
+  results <- data.frame(
+    metric = character(),
+    p_value = numeric(),
+    test_type = character(),
+    significant = logical(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Process each pair
+  for (base_name in common_bases) {
+    
+    col_attn0 <- paste0(base_name, "attn0")
+    col_attn1 <- paste0(base_name, "attn1")
+    
+    # cat("Processing:", base_name, "\n")
+    
+    # Extract data for current pair
+    attn0_data <- data[[col_attn0]]
+    attn1_data <- data[[col_attn1]]
+    
+    # Remove NA values
+    valid_indices <- !is.na(attn0_data) & !is.na(attn1_data) & attn0_data != 0 & attn1_data != 0
+    attn0_clean <- attn0_data[valid_indices]
+    attn1_clean <- attn1_data[valid_indices]
+    
+    if (length(attn0_clean) < 3 || length(attn1_clean) < 3) {
+      cat("  Skipping", base_name, "- insufficient data\n")
+      next
+    }
+    
+    # Perform normality tests
+    shapiro_attn0 <- tryCatch(shapiro.test(attn0_clean), error = function(e) NULL)
+    shapiro_attn1 <- tryCatch(shapiro.test(attn1_clean), error = function(e) NULL)
+    
+    # Decide on test type
+    if (!is.null(shapiro_attn0) && !is.null(shapiro_attn1) && 
+        shapiro_attn0$p.value > 0.05 && shapiro_attn1$p.value > 0.05) {
+      # Both normal - use paired t-test
+      test_result <- tryCatch(
+        t.test(attn0_clean, attn1_clean, paired = TRUE),
+        error = function(e) NULL
+      )
+      test_type <- "Paired t-test"
+      # Effect size (Cohen's d for paired samples)
+      effect_size <- if (!is.null(test_result)) {
+        diff_values <- attn0_clean - attn1_clean
+        mean(diff_values) / sd(diff_values)
+      } else NA
+    } else {
+      # Non-parametric - use Wilcoxon signed-rank test
+      test_result <- tryCatch(
+        wilcox.test(attn0_clean, attn1_clean, paired = TRUE),
+        error = function(e) NULL
+      )
+      test_type <- "Wilcoxon"
+      # Effect size (r = Z / sqrt(N))
+      effect_size <- if (!is.null(test_result) && !is.null(test_result$statistic)) {
+        # Approximation for effect size
+        abs(qnorm(test_result$p.value/2)) / sqrt(length(attn0_clean))
+      } else NA
+    }
+    
+    if (is.null(test_result)) {
+      cat("  Test failed for", base_name, "\n")
+      next
+    }
+    
+    significant_check <- ifelse(test_result$p.value < p_threshold,1,0)
+    
+    results <- rbind(results, data.frame(
+      metric = base_name,
+      p_value = test_result$p.value,
+      test_type = test_type,
+      effect_size = effect_size,
+      stringsAsFactors = FALSE,
+      significant = significant_check
+    ))
+    
+    # cat("  p-value:", sprintf("%.6f", test_result$p.value), 
+    #     ifelse(is_significant, "(significant)", "(not significant)"), "\n")
+    
+    # Generate plot if significant
+    if ( !is.na(test_result$p.value) & significant_check ==1) {
+      
+      # Prepare data for plotting
+      plot_data <- data.frame(
+        value = c(attn0_clean, attn1_clean),
+        x_category = factor(rep(c("Low", "High"), 
+                              c(length(attn0_clean), length(attn1_clean))), levels = c("Low", "High")),
+        id = rep(1:length(attn0_clean), 2)  # for paired data visualization
+      )
+      plot_n_save(plot_data, output_dir,x_title = "Attention Region" , x_lab=c("Low", "High"), base_name, test_result$p.value, test_type)
+
+    }
+  }
+  
+  # Summary statistics
+  cat("\n=== ANALYSIS SUMMARY ===\n")
+  cat("Total metrics analyzed:", nrow(results), "\n")
+  cat("Significant results:", sum(results$significant), "\n")
+  cat("Non-significant results:", sum(!results$significant), "\n")
+  
+  
+  # Save results to CSV
+  results_filename <- file.path(output_dir, "statistical_results.csv")
+  write.csv(results, results_filename, row.names = FALSE)
+  cat("\nResults saved to:", results_filename, "\n")
+  
+  # return(results)
+}
+
+```
+
+```{r }
+for(dataset in c("whole", "MDA", "NU")){
+  data <- merged_df%>%filter(pred == 1)
+  if (dataset != "whole"){
+    data <- data%>%
+      filter(dataset == !!dataset)
+  }
+  analyze_attention_pairs(data, p_threshold = 0.05, output_dir = file.path(output_dir,dataset,"attn_0_1"))
+}
+```
+
+
+```{r analyze_intergroup}
+analyze_intergroup <- function(data, attn = 1, exp = "pred", p_threshold = 0.05, output_dir = "plots") {
+  
+  # Create output directory if it doesn't exist
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Get column names
+  all_cols <- colnames(data)[grepl(paste0(attn, "$"), colnames(data))]
+  
+  # Initialize results storage
+  results <- data.frame(
+    metric = character(),
+    p_value = numeric(),
+    test_type = character(),
+    significant = logical(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Process each pair
+  for (base_name in all_cols) {
+    data_1 <- data%>%
+      filter( !!sym(exp) == 1 )%>%
+      pull(!!sym(base_name))
+    
+    data_0 <- data%>%
+      filter( !!sym(exp) == 0 )%>%
+      pull(!!sym(base_name))
+    
+
+    
+    # Remove NA values
+  data_1_clean <- data_1[!is.na(data_1) & data_1 != 0]
+  data_0_clean <- data_0[!is.na(data_0) & data_0 != 0]
+    
+    
+    
+    if (length(data_1_clean) < 3 || length(data_0_clean) < 3) {
+      cat("  Skipping", base_name, "- insufficient data\n")
+      next
+    }
+    
+    # Perform normality tests
+    shapiro_0 <- tryCatch(shapiro.test(data_0_clean), error = function(e) NULL)
+    shapiro_1 <- tryCatch(shapiro.test(data_1_clean), error = function(e) NULL)
+    
+    # Decide on test type
+    if (!is.null(shapiro_0) && !is.null(shapiro_1) && 
+        shapiro_0$p.value > 0.05 && shapiro_1$p.value > 0.05) {
+      # Both normal - use paired t-test
+      test_result <- tryCatch(
+        t.test(data_0_clean, data_1_clean, var.equal = FALSE),
+        error = function(e) NULL
+      )
+      test_type <- "t-test"
+    } else {
+      # Non-parametric - use Wilcoxon signed-rank test
+      test_result <- tryCatch(
+        wilcox.test(data_0_clean, data_1_clean),
+        error = function(e) NULL
+      )
+      test_type <- "Mann-Whitney U"
+    }
+    
+    if (is.null(test_result)) {
+      cat("  Test failed for", base_name, "\n")
+      next
+    }else{
+      pval <- test_result$p.value
+    }
+    
+    results <- rbind(results, data.frame(
+      metric = base_name,
+      p_value = pval,
+      test_type = test_type,
+      significant = ifelse(pval < p_threshold, 1,0),
+      stringsAsFactors = FALSE
+    ))
+    
+    # Generate plot if significant
+    if (!is.na(pval) & pval < p_threshold ) {
+      if(exp == "progression"){
+             x_lab = c("NCO", "CO")
+             x_title = "Patient Outcome"
+               }else{
+                 x_lab = c("Low", "High")
+                 x_title = "DNA Content"}
+      
+      # Prepare data for plotting
+      plot_data <- data.frame(
+        value = c(data_0_clean, data_1_clean),
+        x_category = factor(rep(x_lab, 
+                              c(length(data_0_clean), length(data_1_clean))),
+                    levels = x_lab)
+      )
+      plot_n_save(plot_data, output_dir,x_title = x_title , x_lab=x_lab, base_name, pval, test_type)
+
+    }
+  }
+  
+  # Summary statistics
+  cat("\n=== ANALYSIS SUMMARY ===\n")
+  cat("Total metrics analyzed:", nrow(results), "\n")
+  cat("Significant results:", sum(results$significant), "\n")
+  cat("Non-significant results:", sum(!results$significant), "\n")
+  
+  
+  # Save results to CSV
+  results_filename <- file.path(output_dir, "statistical_results.csv")
+  write.csv(results, results_filename, row.names = FALSE)
+  cat("\nResults saved to:", results_filename, "\n")
+  
+  return(results)
+}
+
+```
+
+
+```{r}
+# results <- analyze_intergroup(merged_df, p_threshold = 0.05, output_dir = file.path(output_dir,"attn_0_1"))
+for(dataset in c("whole", "MDA","NU")){
+  if (dataset != "whole"){
+    data <- merged_df%>%
+      filter(dataset == !!dataset)
+  }else{
+    data <- merged_df
+  }
+
+  results <- analyze_intergroup(data, attn = 1, exp = "pred", output_dir = file.path(output_dir,dataset,"aneuploid_diploid", "attn1"))
+
+  results <- analyze_intergroup(data, attn = 2, exp = "pred", output_dir = file.path(output_dir,dataset,"aneuploid_diploid", "wholeSlide"))
+  
+  
+  results <- analyze_intergroup(data%>%filter(pred == 1), attn = 1, exp = "progression", output_dir = file.path(output_dir,dataset,"progression", "attn1"))
+  
+  results <- analyze_intergroup(data%>%filter(pred == 1), attn = 2, exp = "progression", output_dir = file.path(output_dir,dataset,"progression", "wholeSlide"))
+  
+}
+
+
+```
+
+```{r}
+results_1_alt <- data_frame(metric_name = character())
+results_w_alt <- data_frame(metric_name = character())
+
+for(dataset in c("whole", "MDA", "NU")){
+  intraslide <- read.csv(file.path(output_dir, dataset, "attn_0_1", "statistical_results.csv")) %>% 
+    filter(significant == 1)
+  interslide_1 <- read.csv(file.path(output_dir, dataset, "aneuploid_diploid", "attn1", "statistical_results.csv")) %>% 
+    filter(significant == 1)
+  interslide_w <- read.csv(file.path(output_dir, dataset, "aneuploid_diploid", "wholeSlide", "statistical_results.csv")) %>% 
+    filter(significant == 1)
+  
+  intraslide$metric_name <- sub("_[^_]*$", "", intraslide$metric)
+  interslide_1$metric_name <- sub("_[^_]*$", "", interslide_1$metric)
+  interslide_w$metric_name <- sub("_[^_]*$", "", interslide_w$metric)
+  
+  # Cleaner approach using setNames()
+  common_cols_1 <- setNames(
+    data.frame(
+      metric_name = intersect(intraslide$metric_name, interslide_1$metric_name),
+      significant = 1
+    ),
+    c("metric_name", paste0("significant_", dataset))
+  )
+  
+  common_cols_w <- setNames(
+    data.frame(
+      metric_name = intersect(intraslide$metric_name, interslide_w$metric_name),
+      significant = 1
+    ),
+    c("metric_name", paste0("significant_", dataset))
+  )
+  results_1_alt <- full_join(common_cols_1,results_1_alt,  by = "metric_name")%>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+  results_w_alt <- full_join(common_cols_w,results_w_alt,  by = "metric_name")%>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+}
+write.csv(results_1_alt,file.path(output_dir, "significant_aneuploid_metrics_attn1.csv"),row.names = F) 
+write.csv(results_w_alt,file.path(output_dir, "significant_aneuploid_metrics_wsi.csv"),row.names = F) 
+
+```
+
+
+```{r}
+results_progress_1 <- data_frame(metric = character())
+results_progress_w <- data_frame(metric = character())
+
+for(dataset in c("whole", "MDA", "NU")){
+  progress_df_1 <- read.csv(file.path(output_dir, dataset, "progression", "attn1", "statistical_results.csv")) %>%
+    select(metric, significant) %>%
+    rename(!!sym(paste0("significant_", dataset)) := significant)  
+  
+  progress_df_w <- read.csv(file.path(output_dir, dataset, "progression", "wholeSlide", "statistical_results.csv")) %>%
+    select(metric, significant) %>%
+    rename(!!sym(paste0("significant_", dataset)) := significant)  
+  
+  results_progress_1 <- full_join(results_progress_1, progress_df_1, by = "metric") %>%
+    mutate(across(everything(), ~ replace_na(., 0)))
+  results_progress_w <- full_join(results_progress_w, progress_df_w, by = "metric") %>%
+    mutate(across(everything(), ~ replace_na(., 0)))
+}
+
+results_1_alt <- results_progress_1 %>%
+  filter(rowSums(select(., starts_with("significant_"))) > 0)
+results_w_alt <- results_progress_w %>%
+  filter(rowSums(select(., starts_with("significant_"))) > 0)
+
+write.csv(results_1_alt,file.path(output_dir, "significant_prog_metrics_attn1.csv"),row.names = F) 
+write.csv(results_w_alt,file.path(output_dir, "significant_prog_metrics_wsi.csv"),row.names = F) 
+
+```
+
+
+# plot specific column for ms
+```{r }
+# install.packages("ggbreak")
+# library(ggbreak)
+
+plot_n_save_specific <- function(plot_data, output_dir, x_lab=c("Low","High"), x_title = "Attention Region", base_name, p_value, test_type, custom_break = NULL){
+  
+      
+      stat_test <- data.frame(
+        group1 = x_lab[1],
+        group2 = x_lab[2], 
+        p = case_when(
+          p_value < 0.0001 ~ "<.0001",
+          p_value < 0.001 ~ "<.001",
+          TRUE ~ paste("=",sub("^0\\.", ".", sprintf("%.3f", p_value))) 
+      ),
+        y.position = max(plot_data$value, na.rm = TRUE) * 1.1,  # Position above the highest point
+        test_name = test_type,  # Add test name to the data frame
+        p.signif = case_when(
+          p_value < 0.001 ~ "***",
+          p_value < 0.01 ~ "**", 
+          p_value < 0.05 ~ "*",
+          TRUE ~ "ns"
+        )
+      )
+      
+      
+      # Create violin + box plot
+      p <- ggplot(plot_data, aes(x = x_category, y = value, fill =x_category)) +
+        geom_violin(alpha = 0.7, trim = FALSE,size = 0.1) +
+        geom_boxplot(width = 0.2, alpha = 0.8, outlier.shape = NA,size = 0.1) +
+        geom_point(position = position_jitter(width = 0.3), alpha = 0.6,size = 0.05) +
+        scale_fill_manual(values = setNames(c("#4575b4", "#fc8d59"), x_lab)) +
+        stat_pvalue_manual(
+          stat_test, 
+          label = "P {p}", 
+          tip.length = 0.02,
+          bracket.size = 0.2,
+          size = 2,
+          xmin = "group1", 
+          xmax = "group2",
+        inherit.aes = F
+        ) +
+        labs(
+          title = base_name,
+          # subtitle = paste0("p-value: ", sprintf("%.4f", p_value), 
+          #                  " (", test_type, ")"),
+          x = x_title,
+          y = "Value"
+        ) +
+        theme_minimal() +
+          theme(
+            plot.title = element_text(size = 6, face = "bold"),
+            axis.title = element_text(size = 5),
+            axis.text = element_text(size =5 ),
+            legend.position = "none",
+            panel.grid.major = element_blank(),  # Remove major grid lines
+            panel.grid.minor = element_blank(),  # Remove minor grid lines
+            axis.line = element_line(color = "black", size = 0.4)  # Add axis lines
+          )
+        # scale_y_break(custom_break)
+      
+      # Save plot
+      return(p)
+}
+```
+
+```{r single plor functions for figures }
+single_intra_wsi <- function(data,base_name,custom_break=NULL){
+  data <- merged_df%>%filter(pred ==1)
+    col_attn0 <- paste0(base_name, "attn0")
+    col_attn1 <- paste0(base_name, "attn1")
+    
+    # cat("Processing:", base_name, "\n")
+    
+    # Extract data for current pair
+    attn0_data <- data[[col_attn0]]
+    attn1_data <- data[[col_attn1]]
+    
+    # Remove NA values
+    valid_indices <- !is.na(attn0_data) & !is.na(attn1_data) & attn0_data != 0 & attn1_data != 0
+    attn0_clean <- attn0_data[valid_indices]
+    attn1_clean <- attn1_data[valid_indices]
+      
+    if (length(attn0_clean) < 3 || length(attn1_clean) < 3) {
+      cat("  Skipping", base_name, "- insufficient data\n")
+      next
+    }
+    
+    # Perform normality tests
+    shapiro_attn0 <- tryCatch(shapiro.test(attn0_clean), error = function(e) NULL)
+    shapiro_attn1 <- tryCatch(shapiro.test(attn1_clean), error = function(e) NULL)
+    
+    # Decide on test type
+    if (!is.null(shapiro_attn0) && !is.null(shapiro_attn1) && 
+        shapiro_attn0$p.value > 0.05 && shapiro_attn1$p.value > 0.05) {
+      # Both normal - use paired t-test
+      test_result <- tryCatch(
+        t.test(attn0_clean, attn1_clean, paired = TRUE),
+        error = function(e) NULL
+      )
+      test_type <- "Paired t-test"
+      # Effect size (Cohen's d for paired samples)
+      effect_size <- if (!is.null(test_result)) {
+        diff_values <- attn0_clean - attn1_clean
+        mean(diff_values) / sd(diff_values)
+      } else NA
+    } else {
+      # Non-parametric - use Wilcoxon signed-rank test
+      test_result <- tryCatch(
+        wilcox.test(attn0_clean, attn1_clean, paired = TRUE),
+        error = function(e) NULL
+      )
+      test_type <- "Wilcoxon"
+      # Effect size (r = Z / sqrt(N))
+      effect_size <- if (!is.null(test_result) && !is.null(test_result$statistic)) {
+        # Approximation for effect size
+        abs(qnorm(test_result$p.value/2)) / sqrt(length(attn0_clean))
+      } else NA
+    }
+    
+    if (is.null(test_result)) {
+      cat("  Test failed for", base_name, "\n")
+      next
+    }
+    
+  
+    
+    # cat("  p-value:", sprintf("%.6f", test_result$p.value), 
+    #     ifelse(is_significant, "(significant)", "(not significant)"), "\n")
+    
+    # Generate plot if significant
+      
+      # Prepare data for plotting
+      plot_data <- data.frame(
+        value = c(attn0_clean, attn1_clean),
+        x_category = factor(rep(c("Low", "High"), 
+                              c(length(attn0_clean), length(attn1_clean))), levels = c("Low", "High")),
+        id = rep(1:length(attn0_clean), 2)  # for paired data visualization
+      )
+      
+       p<- plot_n_save_specific(plot_data, output_dir,x_title = "Attention Region" , x_lab=c("Low", "High"), base_name, test_result$p.value, test_type, custom_break = custom_break )
+       return(p)
+}
+
+single_inter_wsi <- function(data, base_name,attn = 1, exp = "pred",custom_break=NULL){
+  
+  p_threshold = 0.05
+  data_1 <- data%>%
+    filter( !!sym(exp) == 1 )%>%
+    pull(!!sym(base_name))
+  
+  data_0 <- data%>%
+    filter( !!sym(exp) == 0 )%>%
+    pull(!!sym(base_name))
+  
+  
+  # Remove NA values
+  data_1_clean <- data_1[!is.na(data_1) & data_1 != 0]
+  data_0_clean <- data_0[!is.na(data_0) & data_0 != 0]
+  
+  
+  if (length(data_1_clean) < 3 || length(data_0_clean) < 3) {
+    cat("  Skipping", base_name, "- insufficient data\n")
+    next
+  }
+  
+  # Perform normality tests
+  shapiro_0 <- tryCatch(shapiro.test(data_0_clean), error = function(e) NULL)
+  shapiro_1 <- tryCatch(shapiro.test(data_1_clean), error = function(e) NULL)
+  
+  # Decide on test type
+  if (!is.null(shapiro_0) && !is.null(shapiro_1) && 
+      shapiro_0$p.value > 0.05 && shapiro_1$p.value > 0.05) {
+    # Both normal - use paired t-test
+    test_result <- tryCatch(
+      t.test(data_0_clean, data_1_clean, var.equal = FALSE),
+      error = function(e) NULL
+    )
+    test_type <- "t-test"
+  } else {
+    # Non-parametric - use Wilcoxon signed-rank test
+    test_result <- tryCatch(
+      wilcox.test(data_0_clean, data_1_clean),
+      error = function(e) NULL
+    )
+    test_type <- "Mann-Whitney U"
+  }
+  
+  if (is.null(test_result)) {
+    cat("  Test failed for", base_name, "\n")
+    next
+  }else{
+    pval <- test_result$p.value
+  }
+  
+  
+  # Generate plot if significant
+  if (!is.na(pval) & pval < p_threshold ) {
+    if(exp == "progression"){
+           x_lab = c("NCO", "CO")
+           x_title = "Patient Outcome"
+             }else{
+               x_lab = c("Low", "High")
+               x_title = "DNA Content"}
+    
+    # Prepare data for plotting
+    plot_data <- data.frame(
+      value = c(data_0_clean, data_1_clean),
+      x_category = factor(rep(x_lab, 
+                            c(length(data_0_clean), length(data_1_clean))),
+                  levels = x_lab)
+    )
+    p <- plot_n_save_specific(plot_data, output_dir,x_title = x_title , x_lab=x_lab, base_name, pval, test_type, custom_break = custom_break)
+
+  }
+
+  return(p)
+}
+```
+
+
+```{r intrawsi }
+output_dir = "/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/2.4.ecology/compare_metrics/whole/fig_plots"
+
+
+base_names <- c("nuc_median_OD.Sum..Max_",
+                "nuc_median_Hematoxylin..Haralick.Contrast..F1._",
+                "nuc_median_Hematoxylin..Std.dev._",
+                "nuc_q75_Circularity_",
+                "nuc_sd_Area.µm.2_",
+                "nuc_sd_OD.Sum..Median_",
+                "Dens_Immune_",
+                "Moran_Local_LymphoPlasma_Ii_clustered_mean_",
+                "GlobalMoran_Immune_",
+                "meanKNN_Epithelial_Immune_",
+                "Moran_Local_Immune_Ii_clustered_mean_",
+                "Ripley_L12_Epithelial_Immune_frac_positive_")
+for(base_name in base_names){
+  p <- single_intra_wsi(merged_df,base_name)
+  print(p)
+  plot_filename <- file.path(output_dir, "intrawsi", paste0(base_name, ".pdf"))
+  ggsave(plot_filename, p, width = 1.8, height = 1.6, dpi = 300, units = "in")
+  
+  
+  p <- single_inter_wsi(merged_df,paste0(base_name,"attn1"))
+  print(p)
+  plot_filename <- file.path(output_dir, "interwsi", paste0(base_name, ".pdf"))
+  ggsave(plot_filename, p, width = 1.8, height = 1.6, dpi = 300, units = "in")
+}
+```
+
+
+```{r progress}
+
+output_dir = "/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/2.4.ecology/compare_metrics/whole/fig_plots"
+
+
+base_names <- c("Gi_star_Plasma_clustering_strength_attn1","Dens_Plasma_attn1","GlobalMoran_Plasma_attn1")
+for(base_name in base_names){
+
+  p <- single_inter_wsi(merged_df,base_name,exp = "progression")
+  print(p)
+  plot_filename <- file.path(output_dir, "prognosis", paste0(base_name, ".pdf"))
+  ggsave(plot_filename, p, width = 1.8, height = 1.6, dpi = 300, units = "in")
+}
+```
+

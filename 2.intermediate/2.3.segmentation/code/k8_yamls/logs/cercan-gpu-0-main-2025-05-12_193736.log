@@ -1,0 +1,2 @@
+error: container "main" in pod "cercan-gpu-0-7rzrk" is waiting to start: ContainerCreating
+error: container "main" in pod "cercan-gpu-0-7rzrk" is waiting to start: ContainerCreating

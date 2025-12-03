@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cercan-gpu-2
+  namespace: yn-gpu-workload
+  labels:
+      k8s-user: cercan
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      nodeSelector:
+       "nvidia.com/gpu.present": "true"
+      securityContext:
+        runAsUser: 294336
+        runAsGroup: 149100
+        fsGroup: 149100
+      containers:
+        - name: main
+          image: hpcharbor.mdanderson.edu/cercan/segformer@sha256:da5b3ed92b2eeae73e2d73010ab5b9b7ca180897bba1f82bcbed8442263207d7
+          command: ["bash", "/rsrch5/home/trans_mol_path/cercan/BE_master/2.intermediate/2.3.segmentation/finetuner/code/finetune.sh"]
+          args: ["2"]
+          volumeMounts:
+            - name: home
+              mountPath: "/rsrch5/home/trans_mol_path/cercan"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: cercan-gpu-home
+      restartPolicy: Never
+ 

@@ -1,0 +1,667 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(survival)
+library(stringr)
+library(tidyr)
+library(forestmodel)
+
+library(ggrepel)
+```
+
+
+
+```{r}
+csv_folder <- "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/"
+
+merged_df <- readRDS(file.path(csv_folder,"merged_ecology_standardised_250812.RDS"))
+
+merged_df <- merged_df %>%
+  rename_with(~ case_when(
+    # Handle .x suffix (attn2)
+    grepl("^positive_Ripley", .x) & grepl("\\.x$", .x) ~ 
+      sub("^positive_", "", sub("_AUC\\.x$", "_positive_AUC_attn2", .x)),
+    
+    # Handle .y suffix (attn0)  
+    grepl("^positive_Ripley", .x) & grepl("\\.y$", .x) ~ 
+      sub("^positive_", "", sub("_AUC\\.y$", "_positive_AUC_attn0", .x)),
+    
+    # Handle no suffix (attn1) - assuming these are the base columns
+    grepl("^positive_Ripley", .x) & !grepl("\\.[xy]$", .x) ~ 
+      sub("^positive_", "", sub("_AUC$", "_positive_AUC_attn1", .x)),
+    
+    TRUE ~ .x
+  ))%>%
+  relocate(progression,flow,pred,dataset, .after = wsi)%>%
+  rename_with(
+    ~ ifelse(!grepl("[0-9]$", .x), paste0(.x, "_attn2"), .x),
+    .cols = 6:ncol(.)
+  )
+
+
+
+sample_data_withFU <- read_excel("/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/Sample_data/barrett_dataset_withFUtimes.xlsx")
+colnames(sample_data_withFU)[1]<- "wsi"
+colnames(sample_data_withFU)[2]<- "patient"
+colnames(sample_data_withFU)[3]<- "progression"
+colnames(sample_data_withFU)[4]<- "flow"
+sample_data <- sample_data_withFU %>%
+  # filter(Dataset == "NU")%>%
+  mutate(fu_time = ifelse(progression == 0, `Max FU NP`, `Days to EAC`))
+sample_data$progression <- as.factor(sample_data$progression)
+sample_data<- sample_data[,c( "patient","wsi", "progression","flow", "fu_time")]
+
+remove(sample_data_withFU)
+
+
+merged_df <- left_join(merged_df,sample_data%>%select(wsi,fu_time),by ="wsi")%>%
+  relocate(fu_time,progression,flow,pred,dataset, .after = wsi)
+```
+
+# cox
+```{r univariete - eloborate}
+
+metric_names <- colnames(merged_df%>%
+  select(-wsi,-fu_time,-progression,-flow,-pred,-dataset,))
+
+univariate_results <- data_frame(var = as.character(),
+                                 pval = as.numeric())
+
+# merged_fu_eco <- left_join(merged_df_pred1,fu_times%>%select(wsi,fu_time), by = "wsi")
+merged_fu_eco <- merged_df%>%
+  filter(pred == 1)
+for (var in metric_names) {
+  cox_model <- coxph(as.formula(paste("Surv(fu_time, progression) ~", var)), data = merged_fu_eco)
+  summary_model <- summary(cox_model)
+
+  # Extract necessary statistics
+  HR <- summary_model$coefficients[var, "exp(coef)"]
+  se <- summary_model$coefficients[var, "se(coef)"]
+  z <- qnorm(0.975) # z-value for 95% confidence interval
+
+  # Calculate confidence intervals
+  lower <- HR * exp(-z * se)
+  upper <- HR * exp(z * se)
+
+  summary_comdel_df <- data.frame(var = var,
+                                  pval = summary_model$coefficients[var, "Pr(>|z|)"],
+                                  HR = HR,
+                                  lower = lower,
+                                  upper = upper)
+
+  univariate_results <- bind_rows(univariate_results, summary_comdel_df)
+}
+
+significant_vars <- univariate_results %>%
+  filter(pval < 0.05)
+
+# Print significant variables
+print(significant_vars)
+
+# # Create a forest plot
+# forestplot(
+#   labeltext = significant_vars$var,
+#   est = significant_vars$HR,
+#   lower = significant_vars$lower,
+#   upper = significant_vars$upper,
+#   title = "Forest Plot of Significant Variables",
+#   xlab = "Hazard Ratio (95% CI)"
+# )
+significant_vars <- significant_vars %>%
+  mutate(var_label = gsub("_", " ", var))
+ggplot(significant_vars, aes(y = var, x = HR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  labs(title = "Forest Plot of Significant Variables",
+       y = "Variables",
+       x = "Hazard Ratio (95% CI)") +
+  theme_minimal()
+
+
+
+ggplot(significant_vars, aes(x = HR, y = reorder(var, HR))) +
+  geom_point(size = 3, color = "#1f77b4") +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2, color = "#1f77b4") +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  labs(
+    title = "Univariate Cox Regression (Significant Variables)",
+    x = "Hazard Ratio (log scale)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+
+
+```
+
+```{r}
+model <- coxph(as.formula(paste0("Surv(fu_time, progression) ~ ", var)), data = merged_fu_eco)
+```
+
+
+```{r}
+metric_names <- colnames(merged_df%>%
+  select(-wsi,-fu_time,-progression,-flow,-pred,-dataset,))
+
+merged_fu_eco <- merged_df%>%
+  filter(pred == 1)
+
+
+multivariate_df_gen <- function(merged_fu_eco){
+  # Step 1: Fit univariate models and extract those with p < 0.05
+  significant_vars <- metric_names %>%
+    keep(function(var) {
+      model <- coxph(as.formula(paste0("Surv(fu_time, progression) ~ ", var)), data = merged_fu_eco)
+      pval <- summary(model)$coefficients[1, "Pr(>|z|)"]
+      !is.na(pval) && pval < 0.05
+    })
+  
+  # Step 2: Build a model with only those variables
+  formula_sig <- as.formula(paste("Surv(fu_time, progression) ~", paste(significant_vars, collapse = " + ")))
+    cox_model_sig <- coxph(formula_sig, data = merged_fu_eco)
+    
+    # Extract detailed results for visualization
+    coef_summary <- summary(cox_model_sig)$coefficients
+    
+    results_df <- data.frame(
+      variable = rownames(coef_summary),
+      coefficient = coef_summary[, "coef"],
+      hr = exp(coef_summary[, "coef"]),
+      se = coef_summary[, "se(coef)"],
+      pvalue = coef_summary[, "Pr(>|z|)"],
+      lower_ci = exp(coef_summary[, "coef"] - 1.96 * coef_summary[, "se(coef)"]),
+      upper_ci = exp(coef_summary[, "coef"] + 1.96 * coef_summary[, "se(coef)"]),
+      stringsAsFactors = FALSE
+    ) %>%
+      drop_na(hr)%>%
+      mutate(
+        # Create categories for visualization
+        effect_direction = ifelse(hr > 1, "Increased Risk", "Decreased Risk"),
+        effect_magnitude = case_when(
+          abs(log(hr)) < log(1.5) ~ "Small",
+          abs(log(hr)) < log(2) ~ "Moderate", 
+          TRUE ~ "Large"
+        ),
+        pvalue = case_when(pvalue == 0 ~ .Machine$double.eps, 
+                             TRUE ~ pvalue),
+        significance = case_when(
+          pvalue < 0.001 ~ "p < 0.001",
+          pvalue < 0.01 ~ "p < 0.01",
+          pvalue < 0.05 ~ "p < 0.05",
+          TRUE ~ "p >= 0.05"
+        ),
+        # Clean variable names for display
+        clean_name = str_replace_all(variable, "_", " ") %>% 
+                     str_to_title() 
+                     # str_trunc(30)  # Truncate long names
+      ) %>%
+      arrange(pvalue)
+}
+
+results_df <- multivariate_df_gen(merged_fu_eco)
+# results_df_discovery <- multivariate_df_gen(merged_fu_eco%>%filter(dataset == "MDA"))
+# results_df_test <- multivariate_df_gen(merged_fu_eco%>%filter(dataset == "NU"))
+```
+
+```{r}
+plot_forrest <- function(results_df, dataset = ""){
+  top_n <- min(15, nrow(results_df))
+  forest_plot_top <- results_df %>%
+    # Fix 1: Use arrange() instead of sort(), and desc() for descending order
+    arrange(desc(abs(log(hr)))) %>%
+    # Fix 2: Use slice_head() instead of head() (more explicit)
+    slice_head(n = top_n) %>%
+    ggplot(aes(y = reorder(clean_name, -log10(pvalue)))) +
+    geom_point(aes(x = hr, color = effect_direction, size = -log10(pvalue))) +
+    geom_errorbarh(aes(xmin = lower_ci, xmax = upper_ci, color = effect_direction), 
+                   height = 0.3, alpha = 0.7) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+    # scale_x_log10()+#breaks = c(0.5, 1, 2, 4), limits = c(0.1, 10)) +
+    scale_color_manual(values = c("Increased Risk" = "#d32f2f", "Decreased Risk" = "#1976d2")) +
+    scale_size_continuous(range = c(0.5, 2), name = "-log10(p)") +
+    labs(
+      title = paste("Top", top_n, "Features with Largest Effect Size",dataset),
+      subtitle = paste("Multivariate Cox Regression (n =", nrow(merged_fu_eco), "samples)"),
+      x = "Hazard Ratio (95% CI)",
+      y = "Immune Response Features",
+      color = "Effect Direction"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8),
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5, size = 10),
+      panel.grid.minor = element_blank()
+    )
+  
+  print(forest_plot_top)
+  return(forest_plot_top)
+}
+
+save_folder <- "/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/2.4.ecology/cox"
+plot_forrest(results_df)
+p <- plot_forrest(results_df%>% filter(substr(variable, nchar(variable), nchar(variable))==1))
+ggsave(file.path(save_folder,"cox_multivariate_whole_attn1.pdf"),p, width = 8, height = 6, dpi = 300)
+plot_forrest(results_df_discovery, "Discovery set")
+plot_forrest(results_df_test, "Test set")
+
+
+```
+
+
+
+
+
+
+```{r}
+volcano_plot <- results_df %>%
+  mutate(pvalue = case_when(pvalue == 0 ~ .Machine$double.eps, 
+                             TRUE ~ pvalue ))%>%
+    ggplot(aes(x = coefficient, y = -log10(pvalue))) +
+    geom_point(aes(color = effect_direction, size = abs(coefficient)), alpha = 0.7) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    scale_color_manual(values = c("Increased Risk" = "#d32f2f", "Decreased Risk" = "#1976d2")) +
+    scale_size_continuous(range = c(1, 4), name = "Effect Size") +
+    labs(
+      title = "Volcano Plot: Effect Size vs Significance",
+      subtitle = "Immune Response Features in Cox Regression",
+      x = "Log Hazard Ratio (Coefficient)",
+      y = "-log10(P-value)",
+      color = "Effect Direction"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(volcano_plot)
+
+```
+
+```{r}
+create_split_volcano <- function(results_df, break_point = 20) {
+  
+  results_df <- results_df %>%
+    mutate(
+      neg_log10_p = -log10(pvalue),
+      y_adjusted = ifelse(neg_log10_p <= break_point, 
+                         neg_log10_p,
+                         break_point + (neg_log10_p - break_point) * 0.3) # Compress upper values
+    )
+  
+  p2 <- results_df %>%
+    ggplot(aes(x = coefficient, y = y_adjusted)) +
+    geom_point(aes(color = effect_direction, size = abs(coefficient)), alpha = 0.7) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    # Add break indicator
+    geom_hline(yintercept = break_point, linetype = "dotted", color = "orange", alpha = 0.7) +
+    scale_color_manual(values = c("Increased Risk" = "#d32f2f", "Decreased Risk" = "#1976d2")) +
+    scale_size_continuous(range = c(1, 4), name = "Effect Size") +
+    labs(
+      title = "Volcano Plot with Compressed Y-axis",
+      subtitle = paste("Values above -log10(p) =", break_point, "are compressed (dotted line)"),
+      x = "Log Hazard Ratio (Coefficient)",
+      y = "-log10(P-value) [compressed scale above break]",
+      color = "Effect Direction"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  return(p2)
+}
+
+
+p <- create_split_volcano(results_df)
+p
+```
+
+
+
+
+```{r}
+results_categorized <- results_df %>%
+    mutate(
+      category = case_when(
+        str_detect(variable, "(?i)cd|immune|lymph|tcell|bcell") ~ "Immune Cells",
+        str_detect(variable, "(?i)tumor|cancer|malig") ~ "Tumor Features",
+        str_detect(variable, "(?i)stroma|fibro|collagen") ~ "Stromal Features",
+        str_detect(variable, "(?i)vessel|vascul|endoth") ~ "Vascular Features",
+        str_detect(variable, "(?i)inflam|cytok") ~ "Inflammation",
+        str_detect(variable, "(?i)prolif|ki67|mitot") ~ "Proliferation",
+        str_detect(variable, "(?i)apopt|necros") ~ "Cell Death",
+        TRUE ~ "Other Features"
+      )
+    )
+  
+  # Create summary by category
+  category_summary <- results_categorized %>%
+    group_by(category, effect_direction) %>%
+    summarise(
+      count = n(),
+      median_hr = median(hr),
+      median_pvalue = median(pvalue),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(names_from = effect_direction, values_from = count, values_fill = 0) %>%
+    mutate(
+      total = `Increased Risk` + `Decreased Risk`,
+      net_effect = `Increased Risk` - `Decreased Risk`
+    )
+  
+  # Category barplot
+  category_plot <- category_summary %>%
+    pivot_longer(cols = c("Increased Risk", "Decreased Risk"), 
+                 names_to = "direction", values_to = "count") %>%
+    ggplot(aes(x = reorder(category, total), y = count, fill = direction)) +
+    geom_col(position = "stack") +
+    scale_fill_manual(values = c("Increased Risk" = "#d32f2f", "Decreased Risk" = "#1976d2")) +
+    coord_flip() +
+    labs(
+      title = "Significant Features by Biological Category",
+      x = "Feature Category",
+      y = "Number of Significant Features",
+      fill = "Effect Direction"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  print(category_plot)
+
+```
+
+
+```{r}
+summary_table <- results_df %>%
+    head(20) %>%
+    mutate(
+      HR_CI = sprintf("%.2f (%.2f-%.2f)", hr, lower_ci, upper_ci),
+      P_value = case_when(
+        pvalue < 0.001 ~ "<0.001",
+        pvalue < 0.01 ~ sprintf("%.3f", pvalue),
+        TRUE ~ sprintf("%.3f", pvalue)
+      )
+    ) %>%
+    select(
+      `Feature` = clean_name,
+      `HR (95% CI)` = HR_CI,
+      `P-value` = P_value,
+      `Effect` = effect_direction,
+      `Magnitude` = effect_magnitude
+    )
+  
+  cat("\n=== TOP 20 MOST SIGNIFICANT FEATURES ===\n")
+  print(summary_table, row.names = FALSE)
+
+```
+
+```{r}
+
+  effect_dist_plot <- results_df %>%
+    ggplot(aes(x = log(hr), fill = effect_direction)) +
+    geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+    scale_fill_manual(values = c("Increased Risk" = "#d32f2f", "Decreased Risk" = "#1976d2")) +
+    labs(
+      title = "Distribution of Effect Sizes",
+      subtitle = "Log Hazard Ratios from Cox Regression",
+      x = "Log Hazard Ratio",
+      y = "Number of Features",
+      fill = "Effect Direction"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  print(effect_dist_plot)
+```
+
+
+# stop
+```{r multivariate&forrest}
+formula_string <- paste("Surv(fu_time, progression) ~", paste(significant_vars, collapse = " + "))
+formula_object <- as.formula(formula_string)
+cox_model <- coxph(formula_object, data = merged_fu_eco)
+summary_uni_cox_model <- summary(cox_model)
+# univ_formulas <- sapply(metric_names,
+#                         function(x) as.formula(paste('Surv(follow_up, progression)~', x)))
+#                         
+# univ_models <- lapply( univ_formulas, function(x){coxph(x, data = merged_pred1_ecoPredicted_fu)})
+
+
+p_values <- summary_uni_cox_model$coefficients[, "Pr(>|z|)"]
+uni_significant_vars <- names(p_values[p_values < 0.05 & !is.na(p_values)])
+
+# plot_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/plot/cox/"
+fplot <- forest_model(cox_model, covariates = uni_significant_vars)
+fplot
+# ggsave(paste0(save_folder,"cox_multivariate.pdf"),fplot, width = 8, height = 6, dpi = 300)
+View(univariate_results%>%
+       filter(pval <0.05)%>%
+       mutate(abs_HR = case_when(
+         1> HR ~ 1/HR,
+         1<HR ~ HR
+       )))
+
+# ggsave(file.path(plot_folder, "wholeDataset_multivariate.png"), plot = fplot, height = 10, width = 15)
+```
+
+```{r}
+plot_data <- fu_times %>%
+  mutate(eco_pred_prob = predictions_whole) %>%
+  group_by(patient,fu_time) %>%  # Assuming you only need to group by patient
+  summarise(max_eco_prob = max(eco_pred_prob)) %>%
+  ungroup() %>%
+  arrange(desc(max_eco_prob)) %>%  # Sort by max_eco_prob in descending order
+  mutate(patient_plot_id = row_number())  # Assign a unique ID based on the sorted order
+
+# Merge the patient_plot_id back to the original data
+fu_times_plot <- fu_times %>%
+  mutate(eco_pred_prob = predictions_whole)%>%
+  mutate(eco_pred = predicted_classes_whole)%>%
+  left_join(plot_data %>% select(patient,fu_time, patient_plot_id), by = c("patient","fu_time"))
+```
+
+
+```{r}
+# Create the point plot
+fu_times_plot%>%
+  filter(progression == 1)%>%
+  filter(dataset=="NU")%>%
+ggplot( aes(x = patient_plot_id, y = eco_pred_prob, color = factor(eco_pred))) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = best_threshold, linetype = "dashed", color = "red") +
+  labs(title = "Biopsy Probabilities by Patient",
+       x = "Patient",
+       y = "Risk score",
+       color = "CO risk") +
+  theme_minimal() +
+  # ylim(0,30)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+fu_times_plot%>%
+  filter(progression == 1)%>%
+  filter(dataset=="MDA")%>%
+ggplot( aes(x = patient_plot_id, y = eco_pred_prob, color = factor(eco_pred))) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = best_threshold, linetype = "dashed", color = "red") +
+  labs(title = "Biopsy Probabilities by Patient",
+       x = "Patient",
+       y = "Risk score",
+       color = "CO risk") +
+  theme_minimal() +
+  # ylim(0,30)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+fu_times_plot%>%
+  filter(progression == 0)%>%
+ggplot( aes(x = patient_plot_id, y = eco_pred_prob, color = factor(eco_pred))) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = best_threshold, linetype = "dashed", color = "red") +
+  labs(title = "Biopsy Probabilities by Patient",
+       x = "Patient",
+       y = "Risk score",
+       color = "CO risk") +
+  theme_minimal() +
+  # ylim(0,30)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r}
+# Assign probabilities and predictions
+fu_times_plot <- fu_times %>%
+  mutate(
+    eco_pred_prob = predictions_whole,
+    eco_pred = predicted_classes_whole
+  )
+
+# Get patient-level max predictions and order by probability, separating MDA and NU
+plot_data <- fu_times_plot %>%
+  group_by(patient, fu_time, dataset) %>%
+  summarise(max_eco_prob = max(eco_pred_prob), .groups = "drop") %>%
+  arrange(dataset == "NU", desc(max_eco_prob)) %>%  # MDA first, then NU
+  mutate(patient_plot_id = row_number())
+
+# Determine split index (last row of MDA)
+split_index <- plot_data %>% filter(dataset == "MDA") %>% summarise(last_id = max(patient_plot_id)) %>% pull(last_id)
+
+# Merge back to full data
+fu_times_plot <- fu_times_plot %>%
+  left_join(plot_data %>% select(patient, fu_time, patient_plot_id), by = c("patient", "fu_time"))
+library(ggplot2)
+
+fu_times_plot %>%
+  filter(progression == 1) %>%  # Only progressors
+  ggplot(aes(x = patient_plot_id, y = eco_pred_prob, color = factor(eco_pred))) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = best_threshold, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = split_index + 0.5, linetype = "dotted", color = "black") +
+  labs(
+    title = "Biopsy Probabilities by Patient",
+    x = "Patient (Discovery → Test)",
+    y = "Risk Score",
+    color = "Predicted CO risk"
+  ) +
+  theme_minimal() +
+  # ylim(0, 1) +  # Change from 30 to 1, assuming eco_pred_prob is a probability
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+```
+
+
+```{r}
+if (length(significant_vars) > 0) {
+  formula_sig <- as.formula(paste("Surv(fu_time, progression) ~", 
+                                  paste(significant_vars, collapse = " + ")))
+  
+  # Fit the multivariate model
+  cox_model_sig <- coxph(formula_sig, data = merged_fu_eco)
+  
+  # Check for convergence issues
+  if (cox_model_sig$iter >= cox_model_sig$control$iter.max) {
+    warning("Model did not converge. Consider reducing variables or checking for collinearity.")
+  }
+  
+  # Print model summary to check for extreme values
+  print(summary(cox_model_sig))
+  
+  # Step 3: Create forest plot with error handling
+  tryCatch({
+    # Method 1: Basic forest plot
+    fplot <- forest_model(cox_model_sig)
+    print(fplot)
+  }, error = function(e1) {
+    message("Standard forest plot failed. Trying alternative approach...")
+    
+    tryCatch({
+      # Method 2: Manual forest plot with controlled limits
+      coef_summary <- summary(cox_model_sig)$coefficients
+      hr <- exp(coef_summary[, "coef"])
+      lower <- exp(coef_summary[, "coef"] - 1.96 * coef_summary[, "se(coef)"])
+      upper <- exp(coef_summary[, "coef"] + 1.96 * coef_summary[, "se(coef)"])
+      
+      # Cap extreme values for plotting
+      hr_capped <- pmax(pmin(hr, 100), 0.01)
+      lower_capped <- pmax(pmin(lower, 100), 0.01)
+      upper_capped <- pmax(pmin(upper, 100), 0.01)
+      
+      # Create data frame for plotting
+      forest_data <- data.frame(
+        variable = rownames(coef_summary),
+        hr = hr_capped,
+        lower = lower_capped,
+        upper = upper_capped,
+        pvalue = coef_summary[, "Pr(>|z|)"]
+      )
+      
+      # Simple forest plot using base R
+      library(ggplot2)
+      fplot_manual <- ggplot(forest_data, aes(x = hr, y = factor(variable, levels = rev(variable)))) +
+        geom_point(size = 3) +
+        geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2) +
+        geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+        scale_x_log10(limits = c(0.1, 10)) +
+        labs(x = "Hazard Ratio (95% CI)", y = "Variables", 
+             title = "Forest Plot - Cox Regression Results") +
+        theme_minimal() +
+        theme(axis.text.y = element_text(size = 8))
+      
+      print(fplot_manual)
+      
+    }, error = function(e2) {
+      message("Alternative plotting also failed. Showing coefficients table instead:")
+      
+      # Method 3: Just print the results table
+      coef_summary <- summary(cox_model_sig)$coefficients
+      results_table <- data.frame(
+        Variable = rownames(coef_summary),
+        HR = round(exp(coef_summary[, "coef"]), 3),
+        Lower_95 = round(exp(coef_summary[, "coef"] - 1.96 * coef_summary[, "se(coef)"]), 3),
+        Upper_95 = round(exp(coef_summary[, "coef"] + 1.96 * coef_summary[, "se(coef)"]), 3),
+        P_value = round(coef_summary[, "Pr(>|z|)"], 4)
+      )
+      
+      print("Cox Regression Results:")
+      print(results_table)
+    })
+  })
+  
+} else {
+  message("No significant variables found after filtering")
+}
+
+# Additional diagnostic: Check for problematic variables
+print("\nDiagnostic information:")
+for (var in metric_names[1:min(5, length(metric_names))]) {
+  var_data <- merged_fu_eco[[var]]
+  if (is.numeric(var_data)) {
+    cat(sprintf("Variable %s: Range [%.2e, %.2e], NA count: %d\n", 
+                var, min(var_data, na.rm = TRUE), max(var_data, na.rm = TRUE), 
+                sum(is.na(var_data))))
+  }
+}
+```
+
+

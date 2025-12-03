@@ -1,0 +1,397 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(sf)
+library(spdep)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(future)
+library(furrr)
+plan(multisession, workers = 120)
+options(future.globals.maxSize = 2^33)
+set.seed(0)
+```
+
+
+```{r region based calculation}
+
+
+spatial_folder = "/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/merged/"
+
+region_level <- readRDS(file.path(spatial_folder, "region_level_250527.RDS"))
+
+# region_level <- region_level %>%
+#   mutate(across(all_of(c("Num.Lymphocyte", "Num.Plasma", "Num.OtherImmune")), ~ replace_na(., 0))) %>%
+#   mutate(Num.LymphoPlasma = Num.Lymphocyte + Num.Plasma) %>%
+#   mutate(Num.Immune = Num.LymphoPlasma + Num.OtherImmune) 
+
+```
+
+
+```{r local G calculation functions}
+calculate_gi_star <- function(data_group, cell_type) {
+  coords <- st_coordinates(data_group)
+  immune_counts <- data_group[[cell_type]]
+  cell_type_name = substr(cell_type, 5, nchar(cell_type))
+  region_id <- data_group$Name
+
+  # Create neighbor matrix
+  nb <- dnearneigh(coords, d1 = 0, d2 = 200)
+
+  # Convert neighbor matrix to spatial weights
+  weights <- nb2listw(nb, style = "B", zero.policy = TRUE)
+  if(!length(immune_counts) >0 ){
+    gi_zval <- 0
+    gi_pval <- 1
+    gi_padj <- 1
+  } else{
+    # Calculate Gi* statistics
+    gi_zval <- as.numeric(localG(immune_counts, weights))
+  
+    # Calculate p-values
+    gi_pval <- format.pval(pnorm(2 * (abs(gi_zval)), lower.tail = FALSE), 2)
+    gi_padj <- format.pval(p.adjustSP(pnorm(2 * (abs(gi_zval)), lower.tail = FALSE), nb, "bonferroni"), 2)
+  }
+  # Combine results into a tibble
+  tibble(
+    Image = unique(data_group$Image),
+    # dataset = unique(data_group$dataset),
+    # flow = unique(data_group$flow),
+    # pred = unique(data_group$pred),
+    # progression = unique(data_group$progression),
+    region_id = region_id,
+    attention_score = data_group$attention_score,
+    !!paste0("Gi_star_", cell_type_name, "_zval") := gi_zval,
+    !!paste0("Gi_", cell_type_name, "_pval") := gi_pval,
+    !!paste0("Gi_", cell_type_name, "_padj") := gi_padj
+  )
+}
+
+# Main function to process the region level data
+process_region_level <- function(region_level, cell_type_list) {
+  spatial_data <- st_as_sf(region_level %>% filter(Parent == "Image"), coords = c("Centroid.X.um", "Centroid.Y.um"), crs = 3857)
+  # if (!dir.exists(output_folder_wsi)) {
+  #   dir.create(output_folder_wsi, recursive = TRUE)
+  # }
+  # write.csv(local_results, file_path, row.names = FALSE)
+
+  wsi_results <- NULL
+  for (cell_type in cell_type_list) {
+    # Calculate Gi* for the current cell type
+  
+  # temp_file_path <- file.path(output_folder_wsi, paste0(cell_type, ".csv"))
+    gi_results <- spatial_data %>%
+      group_by(wsi) %>%
+      group_split() %>%  # Split into groups by image
+      map_df(~ calculate_gi_star(.x, cell_type))  # Compute Gi* for the cell type
+
+    if (is.null(wsi_results)) {
+      wsi_results <- gi_results
+    } else {
+      wsi_results <- left_join(wsi_results, gi_results, by = c("Image","region_id","attention_score"))
+    }
+  }
+
+
+  return(wsi_results)
+}
+# # Process the region level data for each wsi in parallel
+process_single_wsi <- function(wsi, region_level, cell_type_list, output_folder) {
+  wsi_data <- region_level %>% filter(wsi == !!wsi)
+  print(paste0("Running ", wsi))
+  # output_folder_wsi <- file.path(output_folder, wsi)
+  data_with_gi <- process_region_level(wsi_data, cell_type_list)
+  return(data_with_gi)
+}
+
+```
+
+
+```{ check immune counts}
+
+collect_immune_counts <- function(region_level) {
+  # Get unique wsis
+  unique_wsis <- unique(region_level$wsi)
+
+  # Function to count cell types for a given wsi
+  count_cell_types <- function(wsi_df, wsi_name) {
+    cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+
+    # Use lapply to count occurrences of each cell type
+    cell_counts <- lapply(cell_type_list, function(cell_type) {
+      sum(!is.na(wsi_df[[cell_type]]))
+    })
+
+    # Set names for the cell counts
+    names(cell_counts) <- cell_type_list
+
+    # Create a data frame with the counts
+    wsi_cell_counts <- data.frame(
+      wsi = wsi_name,
+      cell_counts
+    )
+
+    # Return the counts as a data frame
+    return(wsi_cell_counts)
+  }
+
+  # Group by wsi and split into a list of data frames
+  grouped_wsi <- region_level %>%
+    group_by(wsi) %>%
+    group_split()
+
+  # Use future_map to apply the counting function to each wsi in parallel
+  cell_counts_list <- future_map(grouped_wsi, function(wsi_df) {
+    wsi_name <- unique(wsi_df$wsi)
+    count_cell_types(wsi_df, wsi_name)
+  })
+
+  # Combine the list of data frames into a single data frame
+  counts_df <- bind_rows(cell_counts_list)
+
+  return(counts_df)
+}
+
+# Example usage
+# Example cell types
+counts_df <- collect_immune_counts(region_level_filtered_toSquares)
+
+# Print the resulting data frame
+View(bind_rows(counts_df))
+
+
+
+sample_sd <- region_level_filtered_toSquares %>%
+    filter(wsi == unique_wsis[1])%>%
+    st_as_sf(., coords = c("Centroid.X.um", "Centroid.Y.um"), crs = 3857)
+  
+levels(sample_sd$Class)
+
+region_level_filtered_toSquares%>%
+  group_by(Image)%>%
+  summarise(across(cell_type_list, ~ sum(.x, na.rm = TRUE)))%>%
+  View(.)
+
+
+```
+
+
+```{r data prepare}
+# Process the region level data
+cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+
+region_level$wsi <- substr(region_level$Image,0,5)
+plan(multisession, workers = 120)
+options(future.globals.maxSize = 2^33)
+
+region_level_filtered_toSquares <- region_level%>%
+  filter(Parent == "Image")%>%
+  drop_na(attention_score)
+unique_wsis <- unique(region_level_filtered_toSquares$wsi)
+```
+
+
+```{r run local calculation}
+wsi_level_getisOrd <- future_map(unique_wsis, ~ process_single_wsi(.x, region_level_filtered_toSquares, cell_type_list, output_folder))%>%
+  bind_rows()
+
+write.csv(wsi_level_getisOrd,paste0("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/","getis_wsi_local_temp.csv"),row.names = F)
+
+```
+
+
+```{r attn_specific_mean_g}
+# attn_specific_mean_g <- function(data_with_gi) {
+#   cell_list <- c("Lymphocyte", "Plasma", "LymphoPlasma", "Immune")
+# 
+#   data_with_gi_attn1 <- data_with_gi %>% filter(attention_score >= 0.5)
+#   data_with_gi_attn0 <- data_with_gi %>% filter(attention_score < 0.5)
+# 
+#   wsi_level_getisOrd_attn1 <- map_df(cell_list, ~ process_single_wsi(data_with_gi_attn1, .x, 1)) %>%
+#     group_by(wsi, dataset, flow, pred, progression) %>%
+#     summarise(across(everything(), max, na.rm = TRUE), .groups = 'drop')
+# 
+#   wsi_level_getisOrd_attn0 <- map_df(cell_list, ~ process_single_wsi(data_with_gi_attn0, .x, 0)) %>%
+#     group_by(wsi, dataset, flow, pred, progression) %>%
+#     summarise(across(everything(), max, na.rm = TRUE), .groups = 'drop')
+# 
+#   wsi_level_getisOrd <- left_join(wsi_level_getisOrd_attn1, wsi_level_getisOrd_attn0, by = c("wsi", "dataset", "flow", "pred", "progression"))
+# 
+#   return(wsi_level_getisOrd)
+# }
+
+
+wsi_level_getisOrd <- read.csv("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/getis_wsi_local_temp.csv")
+mean_local_results <- data.frame(Image = character())
+cell_type_list_df <- c("Lymphocyte", "Plasma", "LymphoPlasma", "Immune")
+
+for (attn_group in c(0, 1, 2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- wsi_level_getisOrd %>% filter(attention_score < 0.5)
+  } else if (attn_group == 1) {
+    filtered_data <- wsi_level_getisOrd %>% filter(attention_score >= 0.5)
+  } else {
+    filtered_data <- wsi_level_getisOrd
+  }
+
+  for (cell_type in cell_type_list_df) {
+    # Calculate the mean for each cell type and attention group
+    attn_cell_mean <- filtered_data %>%
+      group_by(Image) %>%
+      filter(.data[[paste0("Gi_", cell_type, "_pval")]] < 0.05) %>%
+      summarize(!!paste0("Gi_star_", cell_type, "_zval_mean_attn", attn_group) :=
+                  mean(.data[[paste0("Gi_star_", cell_type, "_zval")]], na.rm = TRUE))
+
+
+    # Join the results
+    mean_local_results <- left_join(attn_cell_mean,mean_local_results, by = "Image")
+  }
+}
+mean_local_results <- mean_local_results%>%
+  mutate(across(all_of(starts_with("Gi")), ~  replace_na(., 0)))
+  
+
+```
+
+
+```{r Global functions}
+calculate_global_Getis <- function(data_group, cell_type) {
+  coords <- st_coordinates(data_group)
+  immune_counts <- data_group[[cell_type]]
+  cell_type_name = substr(cell_type, 5, nchar(cell_type))
+    # Create neighbor matrix
+    nb <- dnearneigh(coords, d1 = 0, d2 = 113)
+  if(!length(immune_counts) >0 && !length(nb >0)){
+    global_g=0
+    pval=1
+  }else{
+    
+    # Convert neighbor matrix to spatial weights
+    weights <- nb2listw(nb, style = "B", zero.policy = T)
+    
+    # Calculate Gi* statistics
+    global_g_df <- globalG.test(immune_counts, weights)
+    
+    global_g <- global_g_df$estimate[1]
+    pval <- global_g_df$p.value
+  }
+    tibble(
+    Image = unique(data_group$Image),  
+    # dataset = unique(data_group$dataset),
+    # flow = unique(data_group$flow),  
+    # pred = unique(data_group$pred),  
+    # progression = unique(data_group$progression), 
+    !!paste0("GlobalG_", cell_type_name, "_value") := global_g,
+    !!paste0("GlobalG_", cell_type_name, "_pval") := pval
+  )
+  
+}
+
+process_global <- function(region_level, cell_type_list) {
+
+  spatial_data <- st_as_sf(region_level, coords = c("Centroid.X.um", "Centroid.Y.um"), crs = 3857)
+  cell_type_list <- c("Num.Lymphocyte", "Num.Plasma", "Num.LymphoPlasma", "Num.Immune")
+  wsi_results <- NULL
+
+  for (cell_type in cell_type_list) {
+    # Use safely to handle errors in calculate_global_Getis
+    safe_calculate_global_Getis <- safely(calculate_global_Getis)
+
+    # Calculate Gi* for the current cell type
+    globalg_results <- spatial_data %>%
+      group_by(wsi) %>%
+      group_split() %>%
+      map_df(~ {
+        result <- safe_calculate_global_Getis(.x, cell_type)
+        if (is.null(result$error)) {
+          return(result$result)
+        } else {
+          message("Skipping a group due to error: ", result$error$message)
+          return(NULL)
+        }
+      }) %>%
+      bind_rows() %>%
+      filter(!is.na(Image))  # Ensure we only keep valid results
+
+    # Add the Gi* results as new columns to the main data frame
+    if (is.null(wsi_results)) {
+      wsi_results <- globalg_results
+    } else {
+      wsi_results <- left_join(wsi_results, globalg_results, by = "Image")
+    }
+  }
+  return(wsi_results)
+}
+
+process_single_wsi_global <- function(wsi, region_level) {
+  tryCatch({
+    wsi_data <- region_level %>% filter(wsi == !!wsi)
+    data_with_gi <- process_global(wsi_data)
+    return(data_with_gi)
+  }, error = function(e) {
+    message("Error processing wsi ", wsi, ": ", e$message)
+    # Return a tibble with the expected structure but with NA values
+    return(tibble(Image = as.character(wsi)))
+  })
+}
+
+```
+
+
+```{r run global}
+
+global_getis <- data.frame(Image = character())
+for (attn_group in c(0,1, 2)) {
+  # Filter data based on attention score
+  if (attn_group == 0) {
+    filtered_data <- region_level_filtered_toSquares %>% filter(attention_score < 0.5)
+  } else if (attn_group == 1) {
+    filtered_data <- region_level_filtered_toSquares %>% filter(attention_score >= 0.5)
+  } else {
+    filtered_data <- region_level_filtered_toSquares
+  }
+
+  # Process each wsi and collect results
+  global_getis_attn <- future_map(
+    unique_wsis,
+    ~ process_single_wsi_global(.x, filtered_data),
+    .options = furrr_options(seed = TRUE),
+    .progress = TRUE
+  ) %>%
+    bind_rows() %>%
+    rename_with(~ paste0(., "_attn", attn_group), starts_with("GlobalG_"))
+
+  # Combine results
+  if (is.null(global_getis)) {
+    global_getis <- global_getis_attn
+  } else {
+    global_getis <- left_join(global_getis, global_getis_attn, by = "Image")
+  }
+}
+
+global_getis_df <- global_getis%>%
+  bind_rows()%>%
+  mutate(across(all_of(starts_with("GlobalG_")), ~  replace_na(., 0)))
+
+```
+
+```{r merge local-global}
+wsi_getisOrd_merged <- left_join(mean_local_results, global_getis_df, by = "Image")%>%
+  mutate(wsi = substr(Image, 0,5))%>%
+  select(-Image) %>% 
+  select(-contains("pval"))
+write.csv(wsi_getisOrd_merged,"/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/calculated/getis.csv",row.names = F)
+
+```

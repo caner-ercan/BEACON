@@ -1,0 +1,72 @@
+Name:                 cercan-gpu-0-7rzrk
+Namespace:            yn-gpu-workload
+Priority:             1000
+Priority Class Name:  high-nonpreempting
+Service Account:      default
+Node:                 hpcgpu06/10.113.120.205
+Start Time:           Mon, 12 May 2025 19:37:41 -0500
+Labels:               batch.kubernetes.io/controller-uid=9defc8a7-6c10-43ce-b8e2-b549c1510060
+                      batch.kubernetes.io/job-name=cercan-gpu-0
+                      controller-uid=9defc8a7-6c10-43ce-b8e2-b549c1510060
+                      job-name=cercan-gpu-0
+                      k8s-user=cercan
+                      runai/queue=cercan-yn-gpu-workload-queue
+Annotations:          cni.projectcalico.org/containerID: 1d9be95d4780ab9fbc2d4cbf4d2abe279e0caa7ad1e79f6ad60cf4c3dd8aa568
+                      cni.projectcalico.org/podIP: 10.0.49.177/32
+                      cni.projectcalico.org/podIPs: 10.0.49.177/32
+                      pod-group-name: pg-cercan-gpu-0-7rzrk-9defc8a7-6c10-43ce-b8e2-b549c1510060
+                      received-resource-type: Regular
+                      runai-job-id: 9defc8a7-6c10-43ce-b8e2-b549c1510060
+Status:               Pending
+IP:                   
+IPs:                  <none>
+Controlled By:        Job/cercan-gpu-0
+Containers:
+  main:
+    Container ID:  
+    Image:         hpcharbor.mdanderson.edu/cercan/segformer:latest
+    Image ID:      
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      bash
+      /rsrch5/home/trans_mol_path/cercan/BE_master/2.intermediate/2.3.segmentation/finetuner/code/finetune.sh
+    Args:
+      0
+    State:          Waiting
+      Reason:       ContainerCreating
+    Ready:          False
+    Restart Count:  0
+    Limits:
+      cpu:             24
+      nvidia.com/gpu:  1
+    Requests:
+      cpu:             24
+      nvidia.com/gpu:  1
+    Environment:       <none>
+    Mounts:
+      /rsrch5/home/trans_mol_path/cercan from home (rw)
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-qwfx2 (ro)
+Conditions:
+  Type              Status
+  PodBound          True 
+  Initialized       True 
+  Ready             False 
+  ContainersReady   False 
+  PodScheduled      True 
+Volumes:
+  home:
+    Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+    ClaimName:  cercan-gpu-home
+    ReadOnly:   false
+  kube-api-access-qwfx2:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   Burstable
+Node-Selectors:              nvidia.com/gpu.present=true
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:                      <none>

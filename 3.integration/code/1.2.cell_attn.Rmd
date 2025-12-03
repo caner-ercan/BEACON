@@ -1,0 +1,119 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+setwd("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration")
+
+.libPaths("/rsrch5/home/trans_mol_path/cercan/R/ubuntu/4.3.1/")
+library(dplyr)
+library(tidyr)
+library(readxl)
+
+fix_path <- function(path){
+  os_type <- Sys.info()["sysname"]
+  if (os_type == "Windows"){
+    path <- gsub("/rsrch5", "//d1prprsh5ccifs", path)
+  } else{
+    path <- gsub("//d1prprsh5ccifs", "/rsrch5", path)
+    path <- gsub("/rsrch5/home/trans_mol_path/cercan/", "/rsrch5/home/trans_mol_path/cercan/", path)
+  }
+  return(path)
+}
+
+```
+
+```{r import sample data}
+
+# sample_data_withFU <- read_excel("/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/Sample_data/barrett_dataset_withFUtimes.xlsx")
+sample_data_withFU <- read_excel(fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/Sample_data/barrett_dataset_withFUtimes.xlsx"))
+
+colnames(sample_data_withFU)[1]<- "slide_id"
+colnames(sample_data_withFU)[2]<- "patient"
+colnames(sample_data_withFU)[3]<- "progression"
+colnames(sample_data_withFU)[4]<- "flow"
+colnames(sample_data_withFU)[5]<- "dataset"
+sample_data <- sample_data_withFU %>%
+  # filter(Dataset == "NU")%>%
+  mutate(time = ifelse(progression == 0, `Max FU NP`, `Days to EAC`))
+sample_data$progression <- as.factor(sample_data$progression)
+sample_data<- sample_data[,c( "patient","slide_id", "progression","flow", "dataset", "time")]
+
+
+```
+
+
+
+```{r aneuploid predictions}
+
+# whole_set_csv <- "/rsrch5/home/trans_mol_path/cercan/BE_master/1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv"
+whole_set_csv <- "/rsrch5/home/trans_mol_path/cercan/BE_master_pre250420/1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv"
+
+predictions <- read.csv(whole_set_csv)
+predictions$wsi <-  as.factor(substr(predictions$slide_id, 1, 5))
+colnames(predictions) <- c("slide_id", "flow", "pred", "pred_prob0", "pred_prob", "wsi")
+predictions <- predictions[,c(1:3,5:6)]
+predictions <- left_join(predictions, sample_data %>% mutate(wsi = substr(slide_id, 1, 5))%>%select(wsi,dataset), by = "wsi")
+```
+
+```{r}
+tsv_folder <- fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/2.intermediate/2.4.inference")
+export_folder <- fix_path("/rsrch5/home/trans_mol_path/cercan/BE_master/3.integration/integration_project/spatial_analysis/tabular/merged")
+# collected_files_cells_csv_path <- file.path(export_folder, fix_path("collected_files_cell_attn_cell.csv"))
+
+# Function to process a single file
+process_file <- function(single_file_path) {
+  single_file <- read.delim(single_file_path, na.strings = "NaN")
+  if (nrow(single_file) > 0) {
+    return(single_file)
+  } else {
+    return(NULL)
+  }
+}
+
+# Get the list of TSV files
+tsv_files <- list.files(file.path(tsv_folder, "tsv_attn_cell_250527"), full.names = TRUE)
+
+# Process files using purrr's map_dfr
+datase_collected_files_cells <- map_dfr(tsv_files, process_file)
+
+# Add wsi column
+datase_collected_files_cells$wsi <- substr(datase_collected_files_cells$Image, 1, 5)
+
+# Join with predictions
+datase_collected_files_cells <- left_join(predictions[, 2:6], datase_collected_files_cells, by = "wsi")
+
+# Write to CSV
+# write.csv(datase_collected_files_cells, collected_files_cells_csv_path, row.names = FALSE)
+
+# Define factors
+NU_factor <- 0.4548
+MDA_factor <- 0.5013
+
+# Convert px to um
+collected_files_cells <- datase_collected_files_cells %>%
+  select(-starts_with("Area.")) %>%
+  mutate(
+    across(starts_with("Centroid."), ~ case_when(
+      dataset == "NU" ~ . * NU_factor,
+      dataset == "MDA" ~ . * MDA_factor,
+      TRUE ~ .
+    ), .names = "{sub('px', 'um', {col})}")
+  )
+
+# Join with sample data and process
+attn_cell <- left_join(collected_files_cells, sample_data %>% select(slide_id, progression) %>% rename(wsi = slide_id), by = "wsi") %>%
+  select(-any_of("Object.ID")) %>%
+  mutate(across(c(flow, pred, wsi, Image, Name, Class, Parent, ROI, dataset), as.factor)) %>%
+  drop_na(Image)
+
+# Write final output
+# write.csv(attn_cell, file.path(export_folder, "cell_attn_250527.csv"), row.names = FALSE)
+saveRDS(attn_cell, file.path(export_folder, "cell_level_250527.RDS"))
+```
+
+
+
+

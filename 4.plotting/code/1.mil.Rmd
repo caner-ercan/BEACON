@@ -1,0 +1,456 @@
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+
+base_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master"
+
+
+sample_data_withFU <- read_excel(file.path(base_folder,"0.input/Sample_data/barrett_dataset_withFUtimes.xlsx"))
+colnames(sample_data_withFU)[1]<- "wsi"
+colnames(sample_data_withFU)[2]<- "patient"
+colnames(sample_data_withFU)[3]<- "progression"
+colnames(sample_data_withFU)[4]<- "flow"
+sample_data_withFU <- sample_data_withFU %>%
+  filter(flow != "ND")%>%
+  mutate(fu_time = ifelse(progression == 0, `Max FU NP`, `Days to EAC`))%>%
+  select(-c(`Max FU NP`, `Days to EAC`, `Days til last endo`))
+
+whole_set <- read.csv(file.path(base_folder,"1.aneuploid/0.finetuning/exp_singleroi/results/36138437_nonorm224_roi1/36138437_24_s1/eval/250314_noSq/train_val_test/fold_16.csv"))
+
+split_df <- read.csv(file.path(base_folder,"1.aneuploid/results/training_250131/splits/splits_16_bool.csv"))%>%
+  mutate(split = case_when(
+    train == "True" ~ "train",
+    val == "True" ~ "val"
+  ))%>%
+  rename(wsi = X)%>%
+  select(wsi, split)
+  
+
+
+df <-whole_set%>%
+  select(slide_id,Y_hat)%>%
+  rename(wsi = slide_id,
+         pred = Y_hat)%>%
+  mutate(wsi = substr(wsi,1,5))%>%
+left_join(sample_data_withFU, by = "wsi")%>%
+  left_join(split_df, by = "wsi")%>%
+  mutate(split = case_when(
+    Dataset == "NU" ~ "test",
+    TRUE ~ split))%>%
+    mutate(flow = factor(flow,levels = c(0,1), labels = c("Diploid", "Aneuploid")))
+
+MDA_selected_tissue <- read.csv("/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/0.sampleList/MDA_selected_tissue.csv")
+
+
+
+MDA_detailed <-readxl::read_excel(file.path(base_folder,"/0.input/Sample_data/finalUpdatedDetailed/raw_receivedfromTom/Dysplasia Study Detailed Data.xlsx"))%>%
+  mutate(selected_tisue = as.numeric(substr(Slide, nchar(Slide), nchar(Slide))))%>%
+  drop_na(GradeOfDysplasia)%>%
+  rename(wsi = `Slide #`,
+         patient = RandomID,
+         Age = AgeAtEndo,
+         sex = Gender 
+         )%>%
+  # group_by(wsi,patient,Age,sex)%>%
+  # arrange(desc(Slide)) %>%
+  # summarise(GradeOfDysplasia = first(GradeOfDysplasia), .groups = 'drop')%>%
+  select(wsi,patient,selected_tisue,Age,sex,GradeOfDysplasia)%>%
+  mutate(GradeOfDysplasia = factor(GradeOfDysplasia,levels = c("N","LGD","LGD/HGD","HGD/LGD","HGD")))
+
+MDA_detailed<- left_join(MDA_selected_tissue,MDA_detailed, by = c("wsi","patient","selected_tisue"))
+  
+NU_dem <- read_excel(file.path(base_folder,"/0.input/Sample_data/finalUpdatedDetailed/raw_receivedfromTom/Copy of NU Sample data for Yuan 09262023 updated 10262023 Corrected11072023 with Gender and age at endo.xlsx"))%>%
+  rename(wsi = `Digital ID`,
+         patient = RandomID,
+         Age = `Age at Endo`,
+         sex =Gender 
+         )%>%
+  select(wsi,patient,Age,sex)
+  
+
+df <- left_join(df,bind_rows(MDA_detailed,NU_dem),by=c("wsi", "patient"))
+
+
+df_patient <- df %>%
+  group_by(patient, fu_time, Dataset, Age, split, progression,sex) %>%
+  summarise(
+    flow = factor(max(as.numeric(flow)), levels = 1:2, labels = c("Diploid", "Aneuploid")),
+    pred = factor(max(pred), levels = 0:1, labels = c("Diploid", "Aneuploid")),
+    GradeOfDysplasia = factor(max(as.numeric(GradeOfDysplasia)), levels = 1:5, labels = c("N", "LGD", "LGD/HGD", "HGD/LGD", "HGD"))
+  ) %>%
+  mutate(progression = factor(progression, levels = c(0, 1), labels = c("NCO", "CO")))
+
+```
+
+
+```{r}
+
+draw_cm <- function(subset_name){
+  df <- df%>%
+  filter(split == subset_name)
+  
+  
+  cm <- confusionMatrix(
+  factor(df$pred, levels = c(0, 1)),
+  factor(df$flow, levels = c(0, 1)),
+  positive = "1"
+  )
+  print(cm)  
+  
+  confusion_table <- table(Actual = df$flow, Predicted = df$pred)
+
+  # Convert to data frame and add proper labels
+  confusion_matrix <- data.frame(
+    Actual = c("Diploid", "Aneuploid"),  # 0 = Diploid, 1 = Aneuploid
+    Diploid = c(confusion_table[1,1], confusion_table[2,1]),    # Predicted as 0
+    Aneuploid = c(confusion_table[1,2], confusion_table[2,2])   # Predicted as 1
+  )
+  
+  # Calculate the total for each actual class
+  confusion_matrix$Total <- rowSums(confusion_matrix[, -1])
+  
+  # Calculate percentages
+  confusion_matrix_percent <- confusion_matrix
+  confusion_matrix_percent[, 2:3] <- confusion_matrix[, 2:3] / confusion_matrix$Total * 100
+  
+  # Melt the data frame for percentages
+  confusion_matrix_melted_percent <- melt(select(confusion_matrix_percent, -Total),
+                                          id.vars = "Actual",
+                                          variable.name = "Predicted",
+                                          value.name = "Percentage")
+  
+  # Melt the data frame for absolute numbers
+  confusion_matrix_melted_abs <- melt(select(confusion_matrix, -Total),
+                                      id.vars = "Actual",
+                                      variable.name = "Predicted",
+                                      value.name = "Count")
+  
+  # Create the plot
+  p <- ggplot() +
+    geom_tile(data = confusion_matrix_melted_percent,
+              aes(y = Actual, x = Predicted, fill = Percentage)) +
+    geom_text(data = confusion_matrix_melted_percent,
+              aes(y = Actual, x = Predicted, label = paste0(round(Percentage, 1), "%")),
+              color = "black", size = 5.5, vjust = -0.5) +
+    geom_text(data = confusion_matrix_melted_abs,
+              aes(y = Actual, x = Predicted, label = Count),
+              color = "black", size = 4.5, vjust = 1.5) +
+    scale_fill_gradient(low = "white", high = "darkgreen", limits = c(0, 100)) +
+    scale_y_discrete(limits = rev) +  
+    scale_x_discrete(limits = rev) +  
+    labs(x = "Predicted", y = "Actual", title = paste0(R.utils::capitalize(subset_name), " set") ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text = element_text(size = 13),
+          legend.position = "none",
+          axis.title = element_text(size = 16),
+          title = element_text(size = 25))
+  
+  return(p)
+}
+
+
+
+```
+
+
+
+```{r}
+p <- draw_cm("train")
+p
+ggsave(paste0(save_folder,"/1.mil/cm_aneuploid_train.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+p <- draw_cm("val")
+p
+ggsave(paste0(save_folder,"/1.mil/cm_aneuploid_val.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+p <- draw_cm("test")
+p
+ggsave(paste0(save_folder,"/1.mil/cm_aneuploid_test.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+
+```
+
+```{r}
+prebs <-whole_set%>%
+  select(slide_id,Y,Y_hat,p_1)%>%
+  rename(wsi = slide_id,
+         flow = Y,
+         pred = Y_hat)%>%
+  mutate(wsi = substr(wsi,1,5))%>%
+left_join(select(merged_df,c("wsi","subset")), by = "wsi")%>%
+  drop_na(subset)%>%
+  mutate()
+
+library(pROC)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+```
+
+
+```{r}
+roc_list <- prebs %>%
+  group_split(subset) %>%
+  map(~ {
+    roc_obj <- roc(.x$flow, .x$p_1, quiet = TRUE)
+    data.frame(
+      specificity = rev(roc_obj$specificities),
+      sensitivity = rev(roc_obj$sensitivities),
+      subset = unique(.x$subset)
+    )
+  }) %>%
+  bind_rows()
+
+# Calculate AUC values for each subset
+auc_labels <- prebs %>%
+  group_split(subset) %>%
+  map_df(~ {
+    roc_obj <- roc(.x$flow, .x$p_1, quiet = TRUE)
+    data.frame(subset = unique(.x$subset), auc = as.numeric(auc(roc_obj)))
+  })
+
+# Plot with ggplot2
+roc_plot <- ggplot(roc_list, aes(x = 1 - specificity, y = sensitivity, color = subset)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_light(base_size = 14) +
+  theme(
+    legend.position = "none",  # Remove the legend
+    panel.grid = element_blank(),
+    axis.title = element_text(size = 14),  # Increase axis title text size
+    axis.text = element_text(size = 12)     # Increase axis text size
+  )
+
+# Add AUC annotations to the plot
+for (i in seq_along(auc_labels$subset)) {
+  roc_plot <- roc_plot +
+    annotate(
+      "text",
+      x = 0.6,
+      y = 0.4 - 0.1 * i,
+      label = paste(auc_labels$subset[i], "set AUC:", round(auc_labels$auc[i], 3)),
+      color = "black",
+      size = 6
+    )
+}
+
+# Print the plot
+print(roc_plot)
+
+ggsave(paste0(save_folder,"/1.mil/aneuploid_roc.pdf"), roc_plot, width = 14, height = 9, dpi = 300, units = "cm")
+
+```
+
+```{r flow_mil combined }
+save_folder=file.path(base_folder,"4.plotting","output","1.mil")
+
+# tmp_df <- df %>%
+#   mutate(
+#     flow_and_pred = as.numeric((flow == "Aneuploid") & (pred == 1))
+#   ) %>%
+#   group_by(patient, fu_time, Dataset, Age, split, progression,sex) %>%
+#   summarise(
+#     flow = factor(max(as.numeric(flow)), levels = 1:2, labels = c("Diploid", "Aneuploid")),
+#     pred = factor(max(pred), levels = 0:1, labels = c("Diploid", "Aneuploid")),
+#     flow_and_pred = factor(max(flow_and_pred), levels = 0:1, labels = c("Diploid", "Aneuploid")),
+#     GradeOfDysplasia = factor(max(as.numeric(GradeOfDysplasia)), levels = 1:5, labels = c("N", "LGD", "LGD/HGD", "HGD/LGD", "HGD")),
+#     .groups = "drop"
+#   ) %>%
+#   mutate(progression = factor(progression, levels = c(1,0), labels = c("CO", "NCO")),
+#          flow_or_pred = as.numeric((flow == "Aneuploid") | (pred == "Aneuploid")),
+#         flow_or_pred = factor(flow_or_pred, levels = c(0,1), labels = c("Diploid", "Aneuploid")))
+
+
+plot_contingency <- function(tmp_df, dataset_value, var){
+  
+  var_sym <- sym(var)
+  print(dataset_value)
+  if(dataset_value != "whole"){
+    tmp_df <- tmp_df %>%
+      filter(dataset == dataset_value)
+  }
+  print(nrow(tmp_df))
+  
+  # Debug: Check what data we have
+  cat("Factor levels:", levels(tmp_df$progression), "\n")
+  cat("Unique values:", unique(as.character(tmp_df$progression)), "\n")
+  
+  # Calculate p-value
+  pval <- table(tmp_df[c(var, 'progression')]) %>%
+    chisq.test() %>%
+    .$p.value
+  
+  # Get number of unique levels for annotation positioning
+  n_levels <- length(unique(tmp_df[[var]]))
+  x_pos <- (n_levels + 1) / 2
+  
+  # Create the plot
+  p <- tmp_df %>%
+    group_by(!!var_sym, progression) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    mutate(prop = count / sum(count)) %>%
+    ggplot(aes(x = !!var_sym, y = prop, fill = progression)) +
+      geom_bar(stat = "identity", position = "fill") + 
+      geom_text(aes(label = count),
+                position = position_fill(vjust = 0.5), 
+                size = 2) +
+      scale_fill_manual(values = c("#ca0020", "#92c5de")) +
+      labs(x = tools::toTitleCase(var), y = "Proportion (%)") +
+      annotate("text", x = x_pos, y = 1.05, 
+               label = bquote(chi^2 ~ ", p=" ~ .(signif(pval, 3))), size = 1.6) +
+      theme_light() + 
+      theme(panel.grid = element_blank(),
+            panel.border = element_blank(),
+            axis.line = element_line(size = 0.5),
+            axis.title = element_text(size = 5),
+            axis.text = element_text(size = 4),
+            legend.title = element_text(size = 5),
+            legend.text = element_text(size = 4))
+  
+  # ggsave(file.path(save_folder, paste0("co_",dataset,"_", var, ".pdf")), p, height = 3.7, width = 6, units = "cm")
+  print(p)
+}
+
+csv_save_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/organised_wsi_patient"
+MIL_patient <- read.csv(file.path(csv_save_folder,"MIL_patients.csv"))
+plot_contingency(MIL_patient,"whole","flow")
+plot_contingency(MIL_patient,"whole","pred")
+plot_contingency(MIL_patient,"MDA","flow")
+plot_contingency(MIL_patient,"MDA","pred")
+# plot_contingency(tmp_df,"MDA","flow_or_pred")
+# plot_contingency(tmp_df,"MDA","flow_and_pred")
+plot_contingency(MIL_patient,"NU","flow")
+plot_contingency(MIL_patient,"NU","pred")
+# plot_contingency(tmp_df,"NU","flow_or_pred")
+# plot_contingency(tmp_df,"NU","flow_and_pred")
+
+```
+
+
+```{r}
+confusion_matrix <- data.frame(
+  Actual = c("Progression", "Non-Progression"),
+  `Progression` = c(27, 3),
+  `Non-Progression` = c(7, 3)
+)
+
+# Calculate the total for each actual class
+confusion_matrix$Total <- rowSums(confusion_matrix[, -1])
+
+# Calculate percentages
+confusion_matrix_percent <- confusion_matrix
+confusion_matrix_percent[, 2:3] <- confusion_matrix[, 2:3] / confusion_matrix$Total * 100
+
+# Melt the data frame for percentages
+confusion_matrix_melted_percent <- melt(select(confusion_matrix_percent, -Total),
+                                        id.vars = "Actual",
+                                        variable.name = "Predicted",
+                                        value.name = "Percentage")
+
+# Melt the data frame for absolute numbers
+confusion_matrix_melted_abs <- melt(select(confusion_matrix, -Total),
+                                    id.vars = "Actual",
+                                    variable.name = "Predicted",
+                                    value.name = "Count")
+
+# Create the plot
+p <- ggplot() +
+  geom_tile(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, fill = Percentage)) +
+  geom_text(data = confusion_matrix_melted_percent,
+            aes(y = Actual, x = Predicted, label = paste0(round(Percentage, 1), "%")),
+            color = "black", size = 5.5, vjust = -0.5) +
+  geom_text(data = confusion_matrix_melted_abs,
+            aes(y = Actual, x = Predicted, label = Count),
+            color = "black", size = 4.5, vjust = 1.5) +
+  scale_fill_gradient(low = "white", high = "darkgreen") +
+  # scale_x_discrete(limits = rev) +  # Reverse the order of the y-axis
+  labs(x = "Predicted", y = "Actual") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Increase x-axis text size
+    axis.text = element_text(size = 13),
+        legend.position = "none",
+    axis.title = element_text(size = 16)) 
+p
+ggsave(paste0(save_folder,"cm_eco.pdf"), p, width = 12, height = 9, dpi = 300, units = "cm")
+
+```
+
+
+
+
+
+```{r disp}
+
+plot_contingency <- function(tmp_df, var_x, var_y){
+  save_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/0.input"
+  var_x_sym <- sym(var_x)
+  var_y_sym <- sym(var_y)
+  
+  # Calculate p-value
+  pval <- table(tmp_df[c(var_x, var_y)]) %>%
+    chisq.test() %>%
+    .$p.value
+  
+  # Get number of unique levels for annotation positioning
+  n_levels <- length(unique(tmp_df[[var_x]]))
+  x_pos <- (n_levels) / 2  # Center the annotation
+  
+  # Create the plot
+  p <- tmp_df %>%
+    group_by(!!var_x_sym, !!var_y_sym) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    mutate(prop = count / sum(count)) %>%
+    ggplot(aes(x = !!var_x_sym, y = prop, fill = !!var_y_sym)) +
+      geom_bar(stat = "identity", position = "fill") + 
+      geom_text(aes(label = count),
+                position = position_fill(vjust = 0.5), 
+                size = 2) +
+      scale_fill_manual(values = c("#ca0020", "#92c5de")) +
+      labs(x = tools::toTitleCase(var_x), y = "Proportion (%)") +  # Dynamic x-label
+      annotate("text", x = x_pos, y = 1.05, 
+               label = bquote(chi^2 ~ ", p=" ~ .(signif(pval, 3))), size = 1.6) +
+      theme_light() + 
+      theme(panel.grid = element_blank(),
+            panel.border = element_blank(),
+            axis.line = element_line(size = 0.5),
+            axis.title = element_text(size = 5),      # Increase axis title size
+            axis.text = element_text(size = 4),       # Increase axis text size
+            legend.title = element_text(size = 5),    # Control legend title size
+            legend.text = element_text(size = 4),
+            legend.position = "none")
+  
+  # Save the plot
+  ggsave(file.path(save_folder, paste0("dysplasia_", var_x, ".pdf")), p, height = 3.5, width = 3.5, units = "cm")
+  print(p)
+  # Return the plot object
+  
+}
+
+tmp_df <- df %>%
+  mutate(Slide = as.numeric(substr(Slide, nchar(Slide), nchar(Slide))))%>%
+  drop_na(GradeOfDysplasia,pred)%>%
+  group_by(wsi,pred,patient,fu_time,flow,Dataset,split)%>%
+  summarise(GradeOfDysplasia = first(GradeOfDysplasia[Slide == max(Slide)]), .groups = 'drop')%>%
+  mutate(flow = as.numeric(flow))%>%
+  mutate(dysplasia = case_when(
+    GradeOfDysplasia %in% c("LGD","LGD/HGD", "HGD/LGD", "HGD") ~ "Dysplasia",
+    GradeOfDysplasia == "N" ~ "No Dysplasia"))
+
+plot_contingency(tmp_df, "flow", "dysplasia")
+plot_contingency(tmp_df, "pred", "dysplasia")
+```
+
+
+

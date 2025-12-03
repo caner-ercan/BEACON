@@ -1,0 +1,390 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(dplyr)
+library(pROC)
+library(ggplot2)
+library(purrr)
+
+library(survminer)
+library(survival)
+library(reshape2)
+
+
+# parent_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/3.1.ecology/mae_7_5_withnuc/"
+# result_path = file.path(parent_folder,"risk_patient.csv")
+# probs_path = file.path(parent_folder,"predictions_with_metadata.csv")
+# results <- read.csv(result_path)  
+# prebs <- read.csv(probs_path)
+
+
+csv_save_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/0.input/organised_wsi_patient"
+MIL_patient <- read.csv(file.path(csv_save_folder,"eco_patients.csv"))
+
+
+
+```
+
+
+
+
+```{r}
+roc_list <- prebs %>%
+  group_split(eco_split) %>%
+  map(~ {
+    roc_obj <- roc(.x$progression, .x$prediction_prob, quiet = TRUE)
+    data.frame(
+      specificity = rev(roc_obj$specificities),
+      sensitivity = rev(roc_obj$sensitivities),
+      eco_split = unique(.x$eco_split)
+    )
+  }) %>%
+  bind_rows()
+
+# Calculate AUC values for each subset
+auc_labels <- prebs %>%
+  group_split(eco_split) %>%
+  map_df(~ {
+    roc_obj <- roc(.x$progression, .x$prediction_prob, quiet = TRUE)
+    data.frame(eco_split = unique(.x$eco_split), auc = as.numeric(auc(roc_obj)))
+  })
+
+# Plot with ggplot2
+roc_plot <- ggplot(roc_list, aes(x = 1 - specificity, y = sensitivity, color = eco_split)) +
+  geom_line(size = 1.2) +
+  geom_abline(linetype = "dashed", color = "gray") +
+  labs(
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_light(base_size = 14) +
+  theme(
+    legend.position = "none",  # Remove the legend
+    panel.grid = element_blank(),
+    axis.title = element_text(size = 14),  # Increase axis title text size
+    axis.text = element_text(size = 12)     # Increase axis text size
+  )
+
+# Add AUC annotations to the plot
+for (i in seq_along(auc_labels$eco_split)) {
+  roc_plot <- roc_plot +
+    annotate(
+      "text",
+      x = 0.6,
+      y = 0.4 - 0.1 * i,
+      label = paste(auc_labels$eco_split[i], "set AUC:", round(auc_labels$auc[i], 3)),
+      color = "black",
+      size = 6
+    )
+}
+
+# Print the plot
+print(roc_plot)
+
+ggsave(file.path(parent_folder,"fig_plot","eco_model_roc.pdf"), roc_plot, width = 14, height = 9, dpi = 300, units = "cm")
+
+```
+
+
+
+```{r}
+
+plot_save_cm <- function(results,eco_split = FALSE){
+    
+  results_data <- filter(results, risk_category != "Diploid")
+  if (eco_split != FALSE){
+    results_data <- results_data %>%
+      filter(eco_split == !!eco_split)
+  }
+  results_data$predicted_binary <- ifelse(results_data$risk_category == "High Risk", 1, 0)
+  
+  # Create mapping for actual outcomes
+  # progression: 1 -> Progression, 0 -> Non-Progression  
+  results_data$actual_binary <- results_data$progression
+  
+  # Create labels for plotting
+  results_data$predicted_label <- ifelse(results_data$predicted_binary == 1, "CO", "NCO")
+  results_data$actual_label <- ifelse(results_data$progression == 1, "CO", "NCO")
+  
+  # Create confusion matrix using table
+  cm_table <- table(Actual = results_data$actual_label, 
+                    Predicted = results_data$predicted_label)
+  
+  # Convert to data frame
+  confusion_matrix <- data.frame(
+    Actual = rownames(cm_table),
+    CO = cm_table[, "CO"],
+    NCO = cm_table[, "NCO"]
+  )
+  
+  # Calculate the total for each actual class
+  confusion_matrix$Total <- rowSums(confusion_matrix[, -1])
+  
+  # Calculate percentages
+  confusion_matrix_percent <- confusion_matrix
+  confusion_matrix_percent[, 2:3] <- confusion_matrix[, 2:3] / confusion_matrix$Total * 100
+  
+  # Melt the data frame for percentages
+  confusion_matrix_melted_percent <- melt(select(confusion_matrix_percent, -Total),
+                                          id.vars = "Actual",
+                                          variable.name = "Predicted",
+                                          value.name = "Percentage")
+  
+  # Melt the data frame for absolute numbers
+  confusion_matrix_melted_abs <- melt(select(confusion_matrix, -Total),
+                                      id.vars = "Actual",
+                                      variable.name = "Predicted",
+                                      value.name = "Count")
+  
+  # Clean up the predicted column names (remove underscores and make proper labels)
+  confusion_matrix_melted_percent$Predicted <- gsub("_", " ", confusion_matrix_melted_percent$Predicted)
+  confusion_matrix_melted_abs$Predicted <- gsub("_", " ", confusion_matrix_melted_abs$Predicted)
+  
+  # Create the plot
+  p <- ggplot() +
+    geom_tile(data = confusion_matrix_melted_percent,
+              aes(y = Actual, x = Predicted, fill = Percentage)) +
+    geom_text(data = confusion_matrix_melted_percent,
+              aes(y = Actual, x = Predicted, label = paste0(round(Percentage, 1), "%")),
+              color = "black", size = 7, vjust = -0.5) +
+    geom_text(data = confusion_matrix_melted_abs,
+              aes(y = Actual, x = Predicted, label = Count),
+              color = "black", size = 6, vjust = 1.5) +
+    scale_fill_gradient(low = "white", high = "darkgreen") +
+    scale_y_discrete(limits = rev) +
+    labs(x = "Predicted", y = "Actual") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text = element_text(size = 13),
+          legend.position = "none",
+          axis.title = element_text(size = 16)) 
+  
+  p
+  filename <- ifelse(eco_split == FALSE, 
+                     "cm_eco.pdf", 
+                     paste0("cm_eco_", eco_split, ".pdf"))
+  
+  ggsave(
+    filename = file.path(parent_folder, "fig_plot", filename),
+    plot = p, 
+    width = 10, 
+    height = 9, 
+    dpi = 300, 
+    units = "cm"
+  )
+  return(p)
+}
+plot_save_cm(results)
+plot_save_cm(results,"train")
+plot_save_cm(results,"val")
+```
+
+
+
+```{r}
+ggsave_workaround <- function(g){survminer:::.build_ggsurvplot(x = g,
+                                                               surv.plot.height = NULL,
+                                                               risk.table.height = NULL,
+                                                               ncensor.plot.height = NULL)}
+
+create_survival_plot <- function(data, color_set = 1, dataset_name, group_var, title_suffix = "") {
+  # Create formula object directly
+  data <- data%>%filter(fu_time > 14)
+  formula_obj <- as.formula(paste("Surv(fu_time/365, progression) ~", group_var))
+
+  # Create survival fit
+  fit <- surv_fit(formula_obj, data = data)
+  
+  # Create plot title
+  plot_title <- paste("Survival Curve -", dataset_name, title_suffix)
+  
+colors <- NULL
+tables.height <- NULL
+
+# Switch statement to set colors and tables.height based on color_set
+switch(color_set,
+       `1` = {
+         colors <- c("#4575b4", "#fc8d59")
+         tables.height <- 0.3
+       },
+       `2` = {
+         colors <- c("#fee090", "#fc8d59")
+         tables.height <- 0.3
+       },
+       `3` = {
+         colors <- c("#2c7bb6", "#fee090", "#d7191c")
+         tables.height <- 0.35  
+       },
+       {
+         stop("Invalid color_set value. Please use 1, 2, or 3.")
+       }
+)
+
+  # Create survival plot - let ggsurvplot calculate p-value internally
+  plot <- ggsurvplot(fit, 
+                  data = data,
+                  pval = TRUE,
+                  # title = plot_title,
+                  xlab = "Time (years)",
+                  risk.table = T, 
+                  conf.int = FALSE,
+                  palette = colors,
+                  legend = "none",
+                  risk.table.y.text = FALSE,
+                  tables.height = tables.height,
+                  # Text sizing with Arial font
+                  font.main = c(18, "bold"),      # Main title
+                  font.x = c(10, "bold"),         # X-axis title
+                  font.y = c(8, "bold"),         # Y-axis title  
+                  font.tickslab = c(12, "plain"), # Axis tick labels
+                  font.legend = c(14, "bold"),    # Legend text
+                  pval.size = 5,                           # P-value text size
+                  size = 1,                              # Survival curve line thickness
+                  # Risk table styling
+                  risk.table.fontsize = 4,
+                  ggtheme = theme_survminer() + 
+                    theme(axis.line = element_line(color = "black", size = 0.8),
+                          axis.ticks = element_line(color = "black", size = 0.8),
+                          axis.text.y = element_text(size = 8)))
+  
+  
+  # Print the plot
+ print(plot)
+  
+  p <- ggsave_workaround(plot)
+  return(p)
+}
+
+```
+
+```{}
+# Combined analysis with correct p-values
+
+risk_patient <- read.csv(file.path(parent_folder,"risk_patient.csv"))
+risk_patient <- risk_patient%>%
+    mutate(
+      risk_category = factor(risk_category, levels = c("Diploid", "Low Risk", "High Risk"))
+    ) %>%
+    mutate(
+      prediction = factor(prediction, levels = c("Diploid", "Aneuploid"))
+    ) %>%
+    mutate(
+      risk_category_01_2 = factor(risk_category_01_2, levels = c("Diploid + Low Risk", "High Risk")))%>%
+  mutate(flow = factor(flow, labels = c("Diploid", "Aneuploid"), levels = c(0,1)))
+```
+
+
+```{r}
+
+
+eco_patient <- read.csv(file.path(csv_save_folder,"eco_patients.csv"))%>%
+  mutate(risk_category_01_2 = ifelse(pred == "Diploid" | eco_risk_category == "Low Risk","Low Risk",
+                                     ifelse(eco_risk_category == "High Risk","High Risk", NA)),
+         risk_category_01_2 = factor(risk_category_01_2, levels = c("Low Risk", "High Risk")))%>%
+  mutate(progression = case_when(
+    progression == "CO" ~ 1,
+    progression == "NCO" ~ 0,
+    TRUE ~ NA
+  ))
+
+for(dset in c("train", "val", "whole")){
+  plot_df<- eco_patient
+  if (dset != "whole"){
+  plot_df <- eco_patient%>%
+    filter(eco_split == dset)}
+  
+  p <- create_survival_plot(
+  data = plot_df %>% filter(risk_category != "Diploid"),
+  dataset_name = dset,
+  group_var = "risk_category",
+  title_suffix = ""
+  )
+  
+  # ggsave(file.path(parent_folder, "fig_plot",paste0("surv_",dset,"_eco.pdf")),p,width = 4, height = 3.5, dpi = 300)
+  
+  
+  p <- create_survival_plot(
+    data = plot_df, color_set = 3,
+    dataset_name = dset,
+    group_var = "risk_category",
+    title_suffix = ""
+  )
+  
+  # ggsave(file.path(parent_folder, "fig_plot",paste0("surv_",dset,"_eco_3w.pdf")),p, width = 4, height = 3.6, dpi = 300)
+  
+  p <- create_survival_plot(
+    data = plot_df, color_set = 2,
+    dataset_name = dset,
+    group_var = "risk_category_01_2",
+    title_suffix = "(Low Risk + Diploid vs High Risk)"
+  )
+  
+  # ggsave(file.path(parent_folder, "fig_plot",paste0("surv_",dset,"_eco_01_2.pdf")),p, width = 4, height = 3.5, dpi = 300)
+  
+  # Diploid vs Aneuploid
+  p <- create_survival_plot(
+    data = plot_df,
+    dataset_name = dset, color_set = 1,
+    group_var = "pred",
+    title_suffix = "(Diploid vs Aneuploid)"
+  )
+  
+  # ggsave(file.path(parent_folder, "fig_plot",paste0("surv_",dset,"_pred.pdf")),p, width = 4, height = 3.5, dpi = 300)
+  
+  # flow
+  p <- create_survival_plot(
+    data = plot_df,
+    dataset_name = dset, color_set = 1,
+    group_var = "flow",
+    title_suffix = "- flow (Diploid vs Aneuploid)"
+  )
+  
+  # ggsave(file.path(parent_folder, "fig_plot",paste0("surv_",dset,"_flow.pdf")),p, width = 4, height = 3.5, dpi = 300)
+
+
+}
+
+
+
+```
+
+
+```{r}
+MIL_parent_folder = "/Volumes/rsrch5/home/trans_mol_path/cercan/BE_master/4.plotting/output/1.mil"
+
+
+
+for(dset in c("MDA", "NU", "whole")){
+  plot_df<- risk_patient
+  if (dset != "whole"){
+  plot_df <- risk_patient%>%
+    filter(dataset == dset)}
+  
+  p <- create_survival_plot(
+  data = plot_df, color_set = 1,
+  dataset_name = dset,
+  group_var = "prediction",
+  title_suffix = "- pred (Diploid vs Aneuploid)"
+)
+
+ggsave(file.path(MIL_parent_folder,paste0("surv_",dset,"_pred.pdf")),p, width = 4, height = 3.5, dpi = 300)
+
+p <- create_survival_plot(
+  data = plot_df, color_set = 1,
+  dataset_name = dset,
+  group_var = "flow",
+  title_suffix = "- flow (Diploid vs Aneuploid)"
+)
+ggsave(file.path(MIL_parent_folder,paste0("surv_",dset,"_flow.pdf")),p, width = 4, height = 3.5, dpi = 300)
+
+}
+
+```
+```
