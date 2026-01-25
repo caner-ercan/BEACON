@@ -1,6 +1,6 @@
 from __future__ import print_function, division
 import sys
-#sys.path.insert(0, '/rsrch5/home/trans_mol_path/cercan/.conda/envs/clam_albm/lib/python3.7/site-packages/')
+# sys.path.insert(0, '/path/to/site-packages/')
 import os
 import torch
 import numpy as np

@@ -1,6 +1,6 @@
 from __future__ import print_function
 import sys
-#sys.path.insert(0, '/rsrch5/home/trans_mol_path/cercan/.conda/envs/clam/lib/python3.7/site-packages/')
+# sys.path.insert(0, '/path/to/site-packages/')
 import numpy as np
 
 import argparse
