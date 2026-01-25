@@ -15,7 +15,7 @@ Key components:
 - **Spatial Immune Ecology**: Tools for characterizing the spatial distribution of immune cells relative to epithelial structures.
 - **Risk Stratification**: An integrated model for predicting cancer progression risk in Barrett's Esophagus patients.
 
-[Overview](/fig1.png)
+![Overview](/fig1.png)
 
 ## Project Structure
 
